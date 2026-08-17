@@ -1,0 +1,484 @@
+local P=game:GetService("Players").LocalPlayer
+local UIS=game:GetService("UserInputService")
+local RS=game:GetService("RunService")
+local TS=game:GetService("TweenService")
+local CG=game:GetService("CoreGui")
+
+local parent=CG
+pcall(function()if gethui then parent=gethui()end end)
+pcall(function()local x=parent:FindFirstChild("VelocityStuntUI")if x then x:Destroy()end end)
+
+local S={wheel=false,rl=false,fake=false,turbo=false,busy=false,fakeT=0,ret=0,side=1,over=0}
+local O={
+ progressive=true,wheelTurbo=false,rlTurbo=false,reverseTurbo=false,straightTurbo=false,
+ twoStage=false,stage2=false,adaptive=true,infiniteNitro=false,rgbTurbo=true,
+ autoDriftBoost=true,driftTurbo=false,wheelExitBoost=false
+}
+local C={wheel=math.rad(22),rl=math.rad(22),fake=math.rad(11),speed=105,accel=42,burst=38,rocket=88,launch=62,over=145,nitro=100,maxNitro=100,drain=20,regen=12,power=1}
+local av,att,curSeat
+local float={}
+
+local function seat()
+ local c=P.Character
+ local h=c and c:FindFirstChildOfClass("Humanoid")
+ local s=h and h.SeatPart
+ return s and s:IsA("BasePart") and s or nil
+end
+
+local function root()
+ local s=seat()
+ return s and (s.AssemblyRootPart or s) or nil,s
+end
+
+local function clearAV()
+ if av then pcall(function()av:Destroy()end)end
+ if att then pcall(function()att:Destroy()end)end
+ av,att,curSeat=nil,nil,nil
+end
+
+local function getAV()
+ local s=seat()
+ if not s then clearAV()return end
+ if s==curSeat and av and av.Parent then return av,s end
+ clearAV()
+ curSeat=s
+ att=Instance.new("Attachment",s)
+ av=Instance.new("AngularVelocity",s)
+ av.Attachment0=att
+ av.RelativeTo=Enum.ActuatorRelativeTo.Attachment0
+ av.MaxTorque=math.huge
+ return av,s
+end
+
+local function dirFor(s)
+ local d=s.CFrame.LookVector
+ d=Vector3.new(d.X,0,d.Z)
+ if d.Magnitude<.01 then return end
+ d=d.Unit
+ local th=0
+ pcall(function()th=s.ThrottleFloat end)
+ if O.reverseTurbo and th<-.05 then d=-d end
+ return d
+end
+
+local function boost(dt,mul)
+ local r,s=root()
+ if not r or not s then return end
+ local steer=0
+ pcall(function()steer=s.SteerFloat end)
+ if O.straightTurbo and math.abs(steer)>.12 then return end
+ if not O.infiniteNitro then
+  if C.nitro<=0 then return end
+  C.nitro=math.max(0,C.nitro-C.drain*dt)
+ end
+ local d=dirFor(s)
+ if not d then return end
+ local v=r.AssemblyLinearVelocity
+ local h=Vector3.new(v.X,0,v.Z)
+ local cur=h.Magnitude
+ local stage=O.twoStage and (O.stage2 and 1.28 or .78) or 1
+ local target=C.speed*C.power*stage*(mul or 1)
+ if os.clock()<S.over then target=math.max(target,C.over)end
+ if O.adaptive then
+  local k=math.clamp(1-cur/math.max(target,1),.18,1)
+  target=cur+(target-cur)*k
+ end
+ if O.progressive then
+  local t=d*math.max(target,cur)
+  local dif=t-h
+  local step=C.accel*C.power*stage*dt
+  if dif.Magnitude>step then dif=dif.Unit*step end
+  h=h+dif
+ else
+  h=d*math.max(target,cur)
+ end
+ r.AssemblyLinearVelocity=Vector3.new(h.X,v.Y,h.Z)
+end
+
+local function impulse(n)
+ local r,s=root()
+ if not r or not s then return end
+ local d=dirFor(s)
+ if not d then return end
+ r.AssemblyLinearVelocity=r.AssemblyLinearVelocity+d*n*C.power
+end
+
+local function drift()
+ if S.busy then return end
+ local r,s=root()
+ if not r or not s then return end
+ local v=r.AssemblyLinearVelocity
+ if Vector3.new(v.X,0,v.Z).Magnitude<5 then return end
+ S.busy=true
+ S.wheel,S.rl,S.fake=false,false,false
+ clearAV()
+ local steer=0
+ pcall(function()steer=s.SteerFloat end)
+ if math.abs(steer)>.1 then S.side=steer>0 and -1 or 1 else S.side=-S.side end
+ local t=os.clock()
+ while r.Parent and os.clock()-t<.43 do
+  local z=r.AssemblyLinearVelocity
+  r.AssemblyAngularVelocity=Vector3.new(0,S.side*7.3,0)
+  local f=O.driftTurbo and .992 or .97
+  r.AssemblyLinearVelocity=Vector3.new(z.X*f,z.Y,z.Z*f)
+  RS.Heartbeat:Wait()
+ end
+ if r.Parent then r.AssemblyAngularVelocity=Vector3.zero end
+ if O.autoDriftBoost then impulse(22)end
+ S.busy=false
+end
+
+RS.Heartbeat:Connect(function(dt)
+ if not O.infiniteNitro and not S.turbo then C.nitro=math.min(C.maxNitro,C.nitro+C.regen*dt)end
+ if S.turbo then boost(dt,1)end
+ if S.wheel and O.wheelTurbo then boost(dt,.72)end
+ if S.rl and O.rlTurbo then boost(dt,.62)end
+ if S.ret>0 then
+  S.ret=math.max(0,S.ret-dt)
+  local a=getAV()
+  if a then a.AngularVelocity=Vector3.new(-math.rad(8),0,0)end
+  if S.ret==0 then clearAV()end
+  return
+ end
+ if S.wheel or S.rl or S.fake then
+  local a=getAV()
+  if not a then return end
+  if S.wheel then a.AngularVelocity=Vector3.new(C.wheel,0,0)
+  elseif S.rl then a.AngularVelocity=Vector3.new(-C.rl,0,0)
+  else
+   S.fakeT=S.fakeT+dt
+   a.AngularVelocity=S.fakeT<.16 and Vector3.new(C.fake,0,0) or Vector3.zero
+  end
+ elseif not S.busy then clearAV()end
+end)
+
+local gui=Instance.new("ScreenGui",parent)
+gui.Name="VelocityStuntUI"
+gui.ResetOnSpawn=false
+gui.IgnoreGuiInset=true
+
+local function corner(x,r)local c=Instance.new("UICorner",x)c.CornerRadius=UDim.new(0,r)end
+local function stroke(x)local s=Instance.new("UIStroke",x)s.Color=Color3.fromRGB(70,80,115)s.Thickness=1.2 end
+local function tw(x,t,p)TS:Create(x,TweenInfo.new(t,Enum.EasingStyle.Quint,Enum.EasingDirection.Out),p):Play()end
+
+local main=Instance.new("Frame",gui)
+main.Size=UDim2.fromOffset(330,390)
+main.Position=UDim2.new(.5,-165,.5,-195)
+main.BackgroundColor3=Color3.fromRGB(10,12,18)
+main.BorderSizePixel=0
+corner(main,16)stroke(main)
+
+local scale=Instance.new("UIScale",main)
+scale.Scale=.92
+tw(scale,.35,{Scale=1})
+
+local top=Instance.new("Frame",main)
+top.Size=UDim2.new(1,0,0,50)
+top.BackgroundColor3=Color3.fromRGB(18,22,32)
+top.BorderSizePixel=0
+top.Active=true
+corner(top,16)
+
+local title=Instance.new("TextLabel",top)
+title.Size=UDim2.new(1,-56,1,0)
+title.Position=UDim2.fromOffset(14,0)
+title.BackgroundTransparency=1
+title.Text="VELOCITY // STUNT"
+title.TextColor3=Color3.fromRGB(235,242,255)
+title.TextXAlignment=Enum.TextXAlignment.Left
+title.Font=Enum.Font.GothamBold
+title.TextSize=15
+
+local min=Instance.new("TextButton",top)
+min.Size=UDim2.fromOffset(34,30)
+min.Position=UDim2.new(1,-41,.5,-15)
+min.Text="—"
+min.TextSize=18
+min.TextColor3=Color3.new(1,1,1)
+min.BackgroundColor3=Color3.fromRGB(32,38,54)
+min.BorderSizePixel=0
+corner(min,8)
+
+local function drag(obj,h)
+ local d,st,pos,inp=false
+ h.InputBegan:Connect(function(i)
+  if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+   d=true inp=i st=i.Position pos=obj.Position
+   i.Changed:Connect(function()if i.UserInputState==Enum.UserInputState.End then d=false end end)
+  end
+ end)
+ UIS.InputChanged:Connect(function(i)
+  if d and i==inp then
+   local q=i.Position-st
+   obj.Position=UDim2.new(pos.X.Scale,pos.X.Offset+q.X,pos.Y.Scale,pos.Y.Offset+q.Y)
+  end
+ end)
+end
+drag(main,top)
+
+local tabs=Instance.new("Frame",main)
+tabs.Size=UDim2.new(1,-20,0,38)
+tabs.Position=UDim2.fromOffset(10,58)
+tabs.BackgroundTransparency=1
+
+local function tabButton(txt,x)
+ local b=Instance.new("TextButton",tabs)
+ b.Size=UDim2.new(.5,-4,1,0)
+ b.Position=UDim2.new(x,0,0,0)
+ b.Text=txt
+ b.Font=Enum.Font.GothamBold
+ b.TextSize=12
+ b.TextColor3=Color3.fromRGB(210,220,240)
+ b.BackgroundColor3=Color3.fromRGB(25,30,43)
+ b.BorderSizePixel=0
+ corner(b,10)
+ return b
+end
+
+local tbStunt=tabButton("STUNTS",0)
+local tbBoost=tabButton("BOOST",.5)
+
+local function page()
+ local p=Instance.new("ScrollingFrame",main)
+ p.Size=UDim2.new(1,-20,1,-108)
+ p.Position=UDim2.fromOffset(10,102)
+ p.BackgroundTransparency=1
+ p.BorderSizePixel=0
+ p.ScrollBarThickness=3
+ p.AutomaticCanvasSize=Enum.AutomaticSize.Y
+ p.CanvasSize=UDim2.new()
+ local l=Instance.new("UIListLayout",p)
+ l.Padding=UDim.new(0,7)
+ l.SortOrder=Enum.SortOrder.LayoutOrder
+ return p
+end
+
+local stunt=page()
+local boostPage=page()
+boostPage.Visible=false
+
+local function row(parent,h)
+ local r=Instance.new("Frame",parent)
+ r.Size=UDim2.new(1,-4,0,h or 46)
+ r.BackgroundColor3=Color3.fromRGB(18,22,31)
+ r.BorderSizePixel=0
+ corner(r,10)
+ return r
+end
+
+local function toggle(parent,txt,on,cb)
+ local r=row(parent)
+ local l=Instance.new("TextLabel",r)
+ l.Size=UDim2.new(1,-66,1,0)
+ l.Position=UDim2.fromOffset(12,0)
+ l.BackgroundTransparency=1
+ l.Text=txt
+ l.TextColor3=Color3.fromRGB(220,228,245)
+ l.TextXAlignment=Enum.TextXAlignment.Left
+ l.Font=Enum.Font.GothamMedium
+ l.TextSize=12
+ local b=Instance.new("TextButton",r)
+ b.Size=UDim2.fromOffset(44,25)
+ b.Position=UDim2.new(1,-55,.5,-12)
+ b.Text=""
+ b.BorderSizePixel=0
+ corner(b,13)
+ local dot=Instance.new("Frame",b)
+ dot.Size=UDim2.fromOffset(19,19)
+ dot.Position=UDim2.fromOffset(on and 22 or 3,3)
+ dot.BackgroundColor3=Color3.fromRGB(240,244,255)
+ dot.BorderSizePixel=0
+ corner(dot,10)
+ local state=on
+ local function paint()
+  tw(b,.18,{BackgroundColor3=state and Color3.fromRGB(52,96,255) or Color3.fromRGB(47,52,65)})
+  tw(dot,.18,{Position=UDim2.fromOffset(state and 22 or 3,3)})
+ end
+ paint()
+ b.Activated:Connect(function()
+  state=not state
+  paint()
+  cb(state)
+ end)
+ return r
+end
+
+local function cycle(parent,txt,vals,idx,cb)
+ local r=row(parent)
+ local l=Instance.new("TextLabel",r)
+ l.Size=UDim2.new(.58,0,1,0)
+ l.Position=UDim2.fromOffset(12,0)
+ l.BackgroundTransparency=1
+ l.Text=txt
+ l.TextColor3=Color3.fromRGB(220,228,245)
+ l.TextXAlignment=Enum.TextXAlignment.Left
+ l.Font=Enum.Font.GothamMedium
+ l.TextSize=12
+ local b=Instance.new("TextButton",r)
+ b.Size=UDim2.new(.34,0,0,28)
+ b.Position=UDim2.new(.63,0,.5,-14)
+ b.BackgroundColor3=Color3.fromRGB(32,38,54)
+ b.TextColor3=Color3.fromRGB(230,238,255)
+ b.Font=Enum.Font.GothamBold
+ b.TextSize=11
+ b.BorderSizePixel=0
+ corner(b,8)
+ local i=idx
+ local function set()b.Text=tostring(vals[i])cb(vals[i])end
+ set()
+ b.Activated:Connect(function()i=i%#vals+1 set()tw(b,.12,{BackgroundColor3=Color3.fromRGB(52,96,255)})task.delay(.13,function()tw(b,.18,{BackgroundColor3=Color3.fromRGB(32,38,54)})end)end)
+ return r
+end
+
+local function floating(txt,pos,hold,on,off)
+ local f=Instance.new("Frame",gui)
+ f.Size=UDim2.fromOffset(126,50)
+ f.Position=pos
+ f.BackgroundColor3=Color3.fromRGB(17,21,30)
+ f.BorderSizePixel=0
+ f.Visible=false
+ corner(f,12)stroke(f)
+ local b=Instance.new("TextButton",f)
+ b.Size=UDim2.new(1,-30,1,0)
+ b.BackgroundTransparency=1
+ b.Text=txt
+ b.TextColor3=Color3.fromRGB(245,248,255)
+ b.Font=Enum.Font.GothamBold
+ b.TextSize=12
+ local d=Instance.new("TextButton",f)
+ d.Size=UDim2.fromOffset(30,50)
+ d.Position=UDim2.new(1,-30,0,0)
+ d.BackgroundColor3=Color3.fromRGB(29,35,49)
+ d.BorderSizePixel=0
+ d.Text="⋮"
+ d.TextSize=20
+ d.TextColor3=Color3.fromRGB(170,185,215)
+ corner(d,10)
+ drag(f,d)
+ if hold then
+  b.InputBegan:Connect(function(i)
+   if i.UserInputType~=Enum.UserInputType.Touch and i.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+   local alive,moved,active=true,false,false
+   local st=i.Position
+   local c
+   c=i.Changed:Connect(function()
+    if (i.Position-st).Magnitude>12 and not active then moved=true end
+    if i.UserInputState==Enum.UserInputState.End then
+     alive=false
+     if active then off()tw(b,.16,{BackgroundTransparency=1})end
+     c:Disconnect()
+    end
+   end)
+   task.delay(.055,function()
+    if alive and not moved then
+     active=true on()
+     b.BackgroundTransparency=0
+     b.BackgroundColor3=Color3.fromRGB(48,88,225)
+    end
+   end)
+  end)
+ else
+  b.Activated:Connect(function()on()b.BackgroundTransparency=0 b.BackgroundColor3=Color3.fromRGB(48,88,225)task.delay(.1,function()tw(b,.16,{BackgroundTransparency=1})end)end)
+ end
+ table.insert(float,{frame=f,button=b,name=txt})
+ return f,b
+end
+
+local fw,bw=floating("WHEELIE",UDim2.new(1,-140,.44,0),true,function()S.rl,S.fake=false,false S.wheel=true end,function()S.wheel=false if O.wheelExitBoost then impulse(18)end clearAV()end)
+local fr,br=floating("REAR LIFT",UDim2.new(1,-140,.53,0),true,function()S.wheel,S.fake=false,false S.rl=true end,function()S.rl=false clearAV()end)
+local ff,bf=floating("FAKE WHEELIE",UDim2.new(1,-140,.62,0),true,function()S.wheel,S.rl=false,false S.fake=true S.fakeT=0 end,function()S.fake=false S.ret=.12 end)
+local fd,bd=floating("DRIFT",UDim2.new(1,-140,.71,0),false,drift)
+local ft,bt=floating("TURBO",UDim2.new(1,-140,.44,0),true,function()S.turbo=true end,function()S.turbo=false end)
+local fbu,bbu=floating("BURST",UDim2.new(1,-140,.53,0),false,function()impulse(C.burst)end)
+local fro,bro=floating("ROCKET",UDim2.new(1,-140,.62,0),false,function()impulse(C.rocket)end)
+local fla,bla=floating("LAUNCH",UDim2.new(1,-140,.71,0),false,function()impulse(C.launch)end)
+local fov,bov=floating("OVERDRIVE",UDim2.new(1,-140,.80,0),false,function()S.over=os.clock()+1.35 impulse(28)end)
+
+toggle(stunt,"Show Wheelie Button",false,function(v)fw.Visible=v end)
+toggle(stunt,"Show Rear Lift Button",false,function(v)fr.Visible=v end)
+toggle(stunt,"Show Fake Wheelie Button",false,function(v)ff.Visible=v end)
+toggle(stunt,"Show Drift Button",false,function(v)fd.Visible=v end)
+
+toggle(boostPage,"Show Turbo Button",false,function(v)ft.Visible=v end)
+toggle(boostPage,"Show Burst Button",false,function(v)fbu.Visible=v end)
+toggle(boostPage,"Show Rocket Button",false,function(v)fro.Visible=v end)
+toggle(boostPage,"Show Launch Button",false,function(v)fla.Visible=v end)
+toggle(boostPage,"Show Overdrive Button",false,function(v)fov.Visible=v end)
+toggle(boostPage,"Progressive Turbo",O.progressive,function(v)O.progressive=v end)
+toggle(boostPage,"Wheelie Turbo",O.wheelTurbo,function(v)O.wheelTurbo=v end)
+toggle(boostPage,"Rear Lift Turbo",O.rlTurbo,function(v)O.rlTurbo=v end)
+toggle(boostPage,"Reverse Turbo",O.reverseTurbo,function(v)O.reverseTurbo=v end)
+toggle(boostPage,"Straight Turbo",O.straightTurbo,function(v)O.straightTurbo=v end)
+toggle(boostPage,"Two-Stage Turbo",O.twoStage,function(v)O.twoStage=v end)
+toggle(boostPage,"Stage 2",O.stage2,function(v)O.stage2=v end)
+toggle(boostPage,"Adaptive Turbo",O.adaptive,function(v)O.adaptive=v end)
+toggle(boostPage,"Infinite Nitro",O.infiniteNitro,function(v)O.infiniteNitro=v if v then C.nitro=C.maxNitro end end)
+toggle(boostPage,"RGB Turbo",O.rgbTurbo,function(v)O.rgbTurbo=v end)
+toggle(boostPage,"Auto Drift Boost",O.autoDriftBoost,function(v)O.autoDriftBoost=v end)
+toggle(boostPage,"Drift Turbo",O.driftTurbo,function(v)O.driftTurbo=v end)
+toggle(boostPage,"Wheelie Exit Boost",O.wheelExitBoost,function(v)O.wheelExitBoost=v end)
+cycle(boostPage,"Turbo Power",{"25%","50%","75%","100%"},4,function(v)C.power=tonumber(v:match("%d+"))/100 end)
+cycle(boostPage,"Max Speed",{80,105,130,160},2,function(v)C.speed=v end)
+cycle(boostPage,"Turbo Acceleration",{24,42,60,80},2,function(v)C.accel=v end)
+
+local nitro=Instance.new("Frame",main)
+nitro.Size=UDim2.new(1,-20,0,5)
+nitro.Position=UDim2.new(0,10,1,-10)
+nitro.BackgroundColor3=Color3.fromRGB(28,34,48)
+nitro.BorderSizePixel=0
+corner(nitro,3)
+
+local nf=Instance.new("Frame",nitro)
+nf.Size=UDim2.fromScale(1,1)
+nf.BackgroundColor3=Color3.fromRGB(52,96,255)
+nf.BorderSizePixel=0
+corner(nf,3)
+
+RS.RenderStepped:Connect(function()
+ nf.Size=UDim2.fromScale(C.nitro/C.maxNitro,1)
+ if O.rgbTurbo and S.turbo then
+  local col=Color3.fromHSV((os.clock()*.35)%1,.78,1)
+  bt.BackgroundTransparency=0
+  bt.BackgroundColor3=col
+  nf.BackgroundColor3=col
+ else
+  nf.BackgroundColor3=Color3.fromRGB(52,96,255)
+ end
+end)
+
+local function show(pg,b)
+ stunt.Visible=pg==stunt
+ boostPage.Visible=pg==boostPage
+ tw(tbStunt,.18,{BackgroundColor3=stunt.Visible and Color3.fromRGB(52,96,255) or Color3.fromRGB(25,30,43)})
+ tw(tbBoost,.18,{BackgroundColor3=boostPage.Visible and Color3.fromRGB(52,96,255) or Color3.fromRGB(25,30,43)})
+ pg.CanvasPosition=Vector2.zero
+ local g=Instance.new("CanvasGroup",pg)
+ g.GroupTransparency=1
+ tw(g,.2,{GroupTransparency=0})
+ task.delay(.22,function()if g then g:Destroy()end end)
+end
+
+tbStunt.Activated:Connect(function()show(stunt,tbStunt)end)
+tbBoost.Activated:Connect(function()show(boostPage,tbBoost)end)
+show(stunt,tbStunt)
+
+local mini=false
+min.Activated:Connect(function()
+ mini=not mini
+ tabs.Visible=not mini
+ stunt.Visible=not mini
+ boostPage.Visible=false
+ nitro.Visible=not mini
+ tw(main,.24,{Size=mini and UDim2.fromOffset(330,50) or UDim2.fromOffset(330,390)})
+ min.Text=mini and "+" or "—"
+ if not mini then show(stunt,tbStunt)end
+end)
+
+task.spawn(function()
+ while task.wait(.3)do
+  if not seat()then
+   S.wheel,S.rl,S.fake,S.turbo=false,false,false,false
+   clearAV()
+  end
+ end
+end)
