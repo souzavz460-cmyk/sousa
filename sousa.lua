@@ -1,13 +1,18 @@
 --[[
-    ADVANCED MOBILE FLY V2
-    Para o SEU jogo no Roblox Studio
+    ADVANCED MOBILE FLY V4
+    Roblox Studio - LocalScript
 
     Coloque em:
     StarterPlayer > StarterPlayerScripts
 
+    IMPORTANTE:
+    Apague/desative qualquer Fly antigo antes de testar.
+
     MOBILE:
-    - Analógico normal = direção
-    - Segure SUBIR / DESCER = altura
+    • Analógico = movimentação
+    • SUBIR / DESCER = segurar
+    • CAMERA 3D = voa na direção que a câmera olha
+    • HOVER = parada extremamente estável
 ]]
 
 --------------------------------------------------
@@ -17,227 +22,205 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
+local Camera = workspace.CurrentCamera
 
 --------------------------------------------------
 -- CONFIG
 --------------------------------------------------
 
 local Config = {
-	Flying = false,
-	NoClip = false,
-	FaceCamera = true,
-	Boost = false,
 
-	Speed = 60,
+	Flying = false,
+
+	NoClip = false,
+	Camera3D = false,
+	FaceDirection = true,
+
+	Boost = false,
+	Hover = false,
+
+	Speed = 65,
 	VerticalSpeed = 50,
 
-	MinSpeed = 20,
-	MaxSpeed = 200,
+	MinSpeed = 10,
+	MaxSpeed = 300,
+
+	MinVertical = 10,
+	MaxVertical = 200,
+
 	SpeedStep = 10,
+	VerticalStep = 10,
 
-	BoostMultiplier = 1.8,
+	BoostMultiplier = 2,
 
-	-- suavidade
-	Acceleration = 10,
-	Deceleration = 15,
+	Acceleration = 8,
+	Braking = 12,
+	VerticalAcceleration = 10,
 
-	-- velocidade quase zero vira zero de verdade
-	StopThreshold = 0.3,
+	RotationResponsiveness = 25,
+
+	Deadzone = 0.025,
 }
 
 --------------------------------------------------
--- CHARACTER
+-- VARIABLES
 --------------------------------------------------
 
 local Character
 local Humanoid
 local Root
 
-local Attachment
-local Velocity
-local Orientation
+local FlyAttachment
+local LinearVelocity
+local AlignOrientation
 
 local CurrentVelocity = Vector3.zero
 
 local UpHeld = false
 local DownHeld = false
 
+local Original = {}
+
 local CollisionBackup = {}
-local HumanoidBackup = {}
+
+local RenderConnection
+local PhysicsConnection
+local NoClipConnection
 
 --------------------------------------------------
--- CHARACTER SETUP
+-- MATH
 --------------------------------------------------
 
-local function bindCharacter(character)
+local function expAlpha(rate, dt)
+	return 1 - math.exp(-rate * dt)
+end
+
+local function flatVector(v)
+
+	local result = Vector3.new(
+		v.X,
+		0,
+		v.Z
+	)
+
+	if result.Magnitude > 0.001 then
+		return result.Unit
+	end
+
+	return Vector3.zero
+end
+
+--------------------------------------------------
+-- CHARACTER
+--------------------------------------------------
+
+local function setCharacter(character)
 
 	Character = character
-	Humanoid = character:WaitForChild("Humanoid")
-	Root = character:WaitForChild("HumanoidRootPart")
 
-	Attachment = nil
-	Velocity = nil
-	Orientation = nil
+	Humanoid =
+		character:WaitForChild("Humanoid")
+
+	Root =
+		character:WaitForChild("HumanoidRootPart")
 
 	CurrentVelocity = Vector3.zero
 
+	FlyAttachment = nil
+	LinearVelocity = nil
+	AlignOrientation = nil
+
 	CollisionBackup = {}
-	HumanoidBackup = {}
+
+	-- Nunca permitimos que o Fly deixe isso ligado.
+	Humanoid.PlatformStand = false
 end
 
-bindCharacter(
+setCharacter(
 	Player.Character
 	or Player.CharacterAdded:Wait()
 )
 
 --------------------------------------------------
--- PHYSICS
+-- BACKUP HUMANOID
 --------------------------------------------------
 
-local function createPhysics()
-
-	if not Root then
-		return
-	end
-
-	----------------------------------------------
-	-- ATTACHMENT
-	----------------------------------------------
-
-	Attachment =
-		Root:FindFirstChild("MobileFlyAttachment")
-
-	if not Attachment then
-
-		Attachment = Instance.new("Attachment")
-		Attachment.Name = "MobileFlyAttachment"
-		Attachment.Parent = Root
-
-	end
-
-	----------------------------------------------
-	-- LINEAR VELOCITY
-	----------------------------------------------
-
-	Velocity =
-		Root:FindFirstChild("MobileFlyVelocity")
-
-	if not Velocity then
-
-		Velocity = Instance.new("LinearVelocity")
-
-		Velocity.Name = "MobileFlyVelocity"
-
-		Velocity.Attachment0 = Attachment
-
-		Velocity.RelativeTo =
-			Enum.ActuatorRelativeTo.World
-
-		Velocity.VelocityConstraintMode =
-			Enum.VelocityConstraintMode.Vector
-
-		Velocity.VectorVelocity =
-			Vector3.zero
-
-		Velocity.MaxForce =
-			math.huge
-
-		Velocity.Enabled =
-			false
-
-		Velocity.Parent =
-			Root
-	end
-
-	----------------------------------------------
-	-- ALIGN ORIENTATION
-	----------------------------------------------
-
-	Orientation =
-		Root:FindFirstChild(
-			"MobileFlyOrientation"
-		)
-
-	if not Orientation then
-
-		Orientation =
-			Instance.new("AlignOrientation")
-
-		Orientation.Name =
-			"MobileFlyOrientation"
-
-		Orientation.Attachment0 =
-			Attachment
-
-		Orientation.Mode =
-			Enum.OrientationAlignmentMode.OneAttachment
-
-		Orientation.MaxTorque =
-			math.huge
-
-		Orientation.Responsiveness =
-			35
-
-		Orientation.RigidityEnabled =
-			false
-
-		Orientation.Enabled =
-			false
-
-		Orientation.Parent =
-			Root
-	end
-end
-
---------------------------------------------------
--- HUMANOID STABILITY
---------------------------------------------------
-
-local function enableHumanoidStability()
+local function backupHumanoid()
 
 	if not Humanoid then
 		return
 	end
 
-	HumanoidBackup = {
+	Original = {
+
+		WalkSpeed =
+			Humanoid.WalkSpeed,
+
 		AutoRotate =
 			Humanoid.AutoRotate,
 
-		FallingDown =
-			Humanoid:GetStateEnabled(
-				Enum.HumanoidStateType.FallingDown
-			),
+		UseJumpPower =
+			Humanoid.UseJumpPower,
 
-		Ragdoll =
-			Humanoid:GetStateEnabled(
-				Enum.HumanoidStateType.Ragdoll
-			),
+		JumpPower =
+			Humanoid.JumpPower,
+
+		JumpHeight =
+			Humanoid.JumpHeight,
 	}
+end
 
-	Humanoid.Sit = false
+--------------------------------------------------
+-- PREPARE HUMANOID
+--------------------------------------------------
+
+local function prepareHumanoid()
+
+	if not Humanoid then
+		return
+	end
+
+	backupHumanoid()
+
+	------------------------------------------------
+	-- IMPORTANTE
+	--
+	-- Não usamos:
+	--
+	-- PlatformStand
+	-- Physics
+	-- Freefall forçado
+	-- SetStateEnabled
+	-- Ragdoll modification
+	--
+	------------------------------------------------
+
 	Humanoid.PlatformStand = false
 
+	-- Impede a caminhada padrão de competir
+	-- contra o Fly.
+	Humanoid.WalkSpeed = 0
+
+	-- A rotação será controlada por AlignOrientation.
 	Humanoid.AutoRotate = false
 
-	Humanoid:SetStateEnabled(
-		Enum.HumanoidStateType.FallingDown,
-		false
-	)
+	-- Evita o botão Jump dando impulsos durante Fly.
+	if Humanoid.UseJumpPower then
+		Humanoid.JumpPower = 0
+	else
+		Humanoid.JumpHeight = 0
+	end
 
-	Humanoid:SetStateEnabled(
-		Enum.HumanoidStateType.Ragdoll,
-		false
-	)
-
-	-- NÃO usamos Physics.
-	-- Freefall mantém o Humanoid funcionando normalmente.
-	Humanoid:ChangeState(
-		Enum.HumanoidStateType.Freefall
-	)
+	Humanoid.Jump = false
 end
+
+--------------------------------------------------
+-- RESTORE HUMANOID
+--------------------------------------------------
 
 local function restoreHumanoid()
 
@@ -247,32 +230,142 @@ local function restoreHumanoid()
 
 	Humanoid.PlatformStand = false
 
-	if HumanoidBackup.AutoRotate ~= nil then
+	if Original.WalkSpeed ~= nil then
+		Humanoid.WalkSpeed =
+			Original.WalkSpeed
+	end
+
+	if Original.AutoRotate ~= nil then
 		Humanoid.AutoRotate =
-			HumanoidBackup.AutoRotate
-	else
-		Humanoid.AutoRotate = true
+			Original.AutoRotate
 	end
 
-	if HumanoidBackup.FallingDown ~= nil then
+	if Original.UseJumpPower ~= nil then
+		Humanoid.UseJumpPower =
+			Original.UseJumpPower
+	end
 
-		Humanoid:SetStateEnabled(
-			Enum.HumanoidStateType.FallingDown,
-			HumanoidBackup.FallingDown
+	if Original.JumpPower ~= nil then
+		Humanoid.JumpPower =
+			Original.JumpPower
+	end
+
+	if Original.JumpHeight ~= nil then
+		Humanoid.JumpHeight =
+			Original.JumpHeight
+	end
+
+	Original = {}
+end
+
+--------------------------------------------------
+-- CREATE FLY PHYSICS
+--------------------------------------------------
+
+local function createFlyPhysics()
+
+	if not Root then
+		return
+	end
+
+	------------------------------------------------
+	-- ATTACHMENT
+	------------------------------------------------
+
+	FlyAttachment =
+		Root:FindFirstChild(
+			"AdvancedFlyAttachmentV4"
 		)
 
+	if not FlyAttachment then
+
+		FlyAttachment =
+			Instance.new("Attachment")
+
+		FlyAttachment.Name =
+			"AdvancedFlyAttachmentV4"
+
+		FlyAttachment.Parent =
+			Root
 	end
 
-	if HumanoidBackup.Ragdoll ~= nil then
+	------------------------------------------------
+	-- LINEAR VELOCITY
+	------------------------------------------------
 
-		Humanoid:SetStateEnabled(
-			Enum.HumanoidStateType.Ragdoll,
-			HumanoidBackup.Ragdoll
+	LinearVelocity =
+		Root:FindFirstChild(
+			"AdvancedFlyVelocityV4"
 		)
 
+	if not LinearVelocity then
+
+		LinearVelocity =
+			Instance.new("LinearVelocity")
+
+		LinearVelocity.Name =
+			"AdvancedFlyVelocityV4"
+
+		LinearVelocity.Attachment0 =
+			FlyAttachment
+
+		LinearVelocity.RelativeTo =
+			Enum.ActuatorRelativeTo.World
+
+		LinearVelocity.VelocityConstraintMode =
+			Enum.VelocityConstraintMode.Vector
+
+		LinearVelocity.VectorVelocity =
+			Vector3.zero
+
+		LinearVelocity.MaxForce =
+			math.huge
+
+		LinearVelocity.Enabled =
+			false
+
+		LinearVelocity.Parent =
+			Root
 	end
 
-	HumanoidBackup = {}
+	------------------------------------------------
+	-- ORIENTATION
+	------------------------------------------------
+
+	AlignOrientation =
+		Root:FindFirstChild(
+			"AdvancedFlyOrientationV4"
+		)
+
+	if not AlignOrientation then
+
+		AlignOrientation =
+			Instance.new("AlignOrientation")
+
+		AlignOrientation.Name =
+			"AdvancedFlyOrientationV4"
+
+		AlignOrientation.Attachment0 =
+			FlyAttachment
+
+		AlignOrientation.Mode =
+			Enum.OrientationAlignmentMode.OneAttachment
+
+		AlignOrientation.MaxTorque =
+			math.huge
+
+		AlignOrientation.Responsiveness =
+			Config.RotationResponsiveness
+
+		AlignOrientation.RigidityEnabled =
+			false
+
+		AlignOrientation.Enabled =
+			false
+
+		AlignOrientation.Parent =
+			Root
+	end
 end
 
 --------------------------------------------------
@@ -303,12 +396,16 @@ end
 
 local function restoreCollision()
 
-	for part, original in pairs(
+	for part, oldValue in pairs(
 		CollisionBackup
 	) do
 
-		if part and part.Parent then
-			part.CanCollide = original
+		if part
+			and part.Parent
+		then
+
+			part.CanCollide =
+				oldValue
 		end
 	end
 
@@ -316,7 +413,358 @@ local function restoreCollision()
 end
 
 --------------------------------------------------
--- ENABLE FLY
+-- GET MOBILE MOVEMENT
+--------------------------------------------------
+
+local function getMovement()
+
+	if not Humanoid then
+		return Vector3.zero
+	end
+
+	local move =
+		Humanoid.MoveDirection
+
+	if move.Magnitude <
+		Config.Deadzone
+	then
+
+		return Vector3.zero
+	end
+
+	------------------------------------------------
+	-- NORMAL MODE
+	------------------------------------------------
+
+	if not Config.Camera3D then
+
+		return move
+
+	end
+
+	------------------------------------------------
+	-- CAMERA 3D
+	--
+	-- Descobre quanto do joystick representa
+	-- frente/trás e esquerda/direita.
+	--
+	------------------------------------------------
+
+	Camera =
+		workspace.CurrentCamera
+
+	if not Camera then
+		return move
+	end
+
+	local cameraForwardFlat =
+		flatVector(
+			Camera.CFrame.LookVector
+		)
+
+	local cameraRightFlat =
+		flatVector(
+			Camera.CFrame.RightVector
+		)
+
+	if cameraForwardFlat.Magnitude == 0 then
+		return move
+	end
+
+	local forwardAmount =
+		move:Dot(
+			cameraForwardFlat
+		)
+
+	local rightAmount =
+		move:Dot(
+			cameraRightFlat
+		)
+
+	------------------------------------------------
+	-- Frente segue inclusive o pitch da câmera.
+	------------------------------------------------
+
+	local cameraForward =
+		Camera.CFrame.LookVector
+
+	local cameraRight =
+		Camera.CFrame.RightVector
+
+	local direction =
+		cameraForward * forwardAmount
+		+
+		cameraRight * rightAmount
+
+	if direction.Magnitude > 1 then
+		direction =
+			direction.Unit
+	end
+
+	return direction
+end
+
+--------------------------------------------------
+-- GET DESIRED VELOCITY
+--------------------------------------------------
+
+local function calculateTargetVelocity()
+
+	if Config.Hover then
+		return Vector3.zero
+	end
+
+	local movement =
+		getMovement()
+
+	local speed =
+		Config.Speed
+
+	if Config.Boost then
+
+		speed *=
+			Config.BoostMultiplier
+	end
+
+	local horizontal =
+		movement * speed
+
+	------------------------------------------------
+	-- VERTICAL BUTTONS
+	------------------------------------------------
+
+	local verticalInput = 0
+
+	if UpHeld then
+		verticalInput += 1
+	end
+
+	if DownHeld then
+		verticalInput -= 1
+	end
+
+	local vertical =
+		Vector3.new(
+			0,
+			verticalInput
+				* Config.VerticalSpeed,
+			0
+		)
+
+	return horizontal + vertical
+end
+
+--------------------------------------------------
+-- FACE DIRECTION
+--------------------------------------------------
+
+local LastLookDirection =
+	Vector3.new(0, 0, -1)
+
+local function updateOrientation()
+
+	if not AlignOrientation
+		or not Root
+	then
+		return
+	end
+
+	if not Config.FaceDirection then
+
+		AlignOrientation.Enabled =
+			false
+
+		return
+	end
+
+	AlignOrientation.Enabled =
+		true
+
+	local desiredDirection
+
+	------------------------------------------------
+	-- CAMERA
+	------------------------------------------------
+
+	if Camera then
+
+		local look =
+			Camera.CFrame.LookVector
+
+		desiredDirection =
+			flatVector(look)
+
+	end
+
+	------------------------------------------------
+	-- FALLBACK
+	------------------------------------------------
+
+	if not desiredDirection
+		or desiredDirection.Magnitude
+		< 0.1
+	then
+
+		desiredDirection =
+			LastLookDirection
+	end
+
+	if desiredDirection.Magnitude > 0.1 then
+
+		LastLookDirection =
+			desiredDirection
+	end
+
+	------------------------------------------------
+	-- SEMPRE UPRIGHT
+	------------------------------------------------
+
+	AlignOrientation.CFrame =
+		CFrame.lookAt(
+			Vector3.zero,
+			LastLookDirection,
+			Vector3.yAxis
+		)
+end
+
+--------------------------------------------------
+-- PHYSICS LOOP
+--------------------------------------------------
+
+local function startPhysicsLoop()
+
+	if PhysicsConnection then
+		PhysicsConnection:Disconnect()
+	end
+
+	PhysicsConnection =
+		RunService.PreSimulation:Connect(
+			function(dt)
+
+				if not Config.Flying then
+					return
+				end
+
+				if not Character
+					or not Character.Parent
+					or not Humanoid
+					or not Root
+					or not LinearVelocity
+				then
+					return
+				end
+
+				if Humanoid.Health <= 0 then
+					return
+				end
+
+				------------------------------------------------
+				-- NÃO DEIXA PLATFORMSTAND APARECER
+				------------------------------------------------
+
+				if Humanoid.PlatformStand then
+					Humanoid.PlatformStand = false
+				end
+
+				Humanoid.Jump = false
+
+				------------------------------------------------
+				-- ANTI SPIN
+				------------------------------------------------
+
+				Root.AssemblyAngularVelocity =
+					Vector3.zero
+
+				------------------------------------------------
+				-- TARGET
+				------------------------------------------------
+
+				local target =
+					calculateTargetVelocity()
+
+				local moving =
+					target.Magnitude
+					> Config.Deadzone
+
+				local rate
+
+				if moving then
+					rate =
+						Config.Acceleration
+				else
+					rate =
+						Config.Braking
+				end
+
+				local alpha =
+					expAlpha(
+						rate,
+						dt
+					)
+
+				CurrentVelocity =
+					CurrentVelocity:Lerp(
+						target,
+						alpha
+					)
+
+				------------------------------------------------
+				-- PERFECT HOVER
+				------------------------------------------------
+
+				if not moving
+					and CurrentVelocity.Magnitude
+					< 0.15
+				then
+
+					CurrentVelocity =
+						Vector3.zero
+				end
+
+				if Config.Hover then
+
+					CurrentVelocity =
+						Vector3.zero
+				end
+
+				------------------------------------------------
+				-- VELOCITY
+				------------------------------------------------
+
+				LinearVelocity.VectorVelocity =
+					CurrentVelocity
+
+				updateOrientation()
+			end
+		)
+end
+
+--------------------------------------------------
+-- NOCLIP LOOP
+--------------------------------------------------
+
+local function startNoClipLoop()
+
+	if NoClipConnection then
+		NoClipConnection:Disconnect()
+	end
+
+	NoClipConnection =
+		RunService.PreSimulation:Connect(
+			function()
+
+				if Config.Flying
+					and Config.NoClip
+				then
+
+					applyNoClip()
+				end
+			end
+		)
+end
+
+--------------------------------------------------
+-- ENABLE
 --------------------------------------------------
 
 local function enableFly()
@@ -332,9 +780,17 @@ local function enableFly()
 		return
 	end
 
-	Config.Flying = true
+	createFlyPhysics()
+	prepareHumanoid()
 
-	createPhysics()
+	Config.Flying =
+		true
+
+	Config.Hover =
+		false
+
+	UpHeld = false
+	DownHeld = false
 
 	CurrentVelocity =
 		Vector3.zero
@@ -345,25 +801,30 @@ local function enableFly()
 	Root.AssemblyAngularVelocity =
 		Vector3.zero
 
-	enableHumanoidStability()
-
-	Velocity.VectorVelocity =
+	LinearVelocity.VectorVelocity =
 		Vector3.zero
 
-	Velocity.Enabled =
+	LinearVelocity.Enabled =
 		true
 
-	Orientation.Enabled =
-		true
+	AlignOrientation.Enabled =
+		Config.FaceDirection
+
+	startPhysicsLoop()
+	startNoClipLoop()
 end
 
 --------------------------------------------------
--- DISABLE FLY
+-- DISABLE
 --------------------------------------------------
 
 local function disableFly()
 
-	Config.Flying = false
+	Config.Flying =
+		false
+
+	Config.Hover =
+		false
 
 	UpHeld = false
 	DownHeld = false
@@ -371,17 +832,30 @@ local function disableFly()
 	CurrentVelocity =
 		Vector3.zero
 
-	if Velocity then
+	if PhysicsConnection then
 
-		Velocity.VectorVelocity =
+		PhysicsConnection:Disconnect()
+		PhysicsConnection = nil
+	end
+
+	if NoClipConnection then
+
+		NoClipConnection:Disconnect()
+		NoClipConnection = nil
+	end
+
+	if LinearVelocity then
+
+		LinearVelocity.VectorVelocity =
 			Vector3.zero
 
-		Velocity.Enabled =
+		LinearVelocity.Enabled =
 			false
 	end
 
-	if Orientation then
-		Orientation.Enabled =
+	if AlignOrientation then
+
+		AlignOrientation.Enabled =
 			false
 	end
 
@@ -394,258 +868,34 @@ local function disableFly()
 			Vector3.zero
 	end
 
-	restoreHumanoid()
 	restoreCollision()
-
-	if Humanoid
-		and Humanoid.Health > 0
-	then
-
-		Humanoid:ChangeState(
-			Enum.HumanoidStateType.GettingUp
-		)
-	end
+	restoreHumanoid()
 end
 
 --------------------------------------------------
--- SMOOTHING
+-- HARD BRAKE
 --------------------------------------------------
 
-local function smoothAlpha(rate, dt)
-
-	return 1 - math.exp(
-		-rate * dt
-	)
-
-end
-
---------------------------------------------------
--- MAIN FLY LOOP
---------------------------------------------------
-
-RunService.Heartbeat:Connect(function(dt)
-
-	if not Config.Flying then
-		return
-	end
-
-	if not Character
-		or not Character.Parent
-		or not Humanoid
-		or not Root
-		or not Velocity
-	then
-		return
-	end
-
-	if Humanoid.Health <= 0 then
-		return
-	end
-
-	------------------------------------------------
-	-- REMOVE SPIN
-	------------------------------------------------
-
-	Root.AssemblyAngularVelocity =
-		Vector3.zero
-
-	------------------------------------------------
-	-- MOBILE JOYSTICK
-	------------------------------------------------
-
-	local MoveDirection =
-		Humanoid.MoveDirection
-
-	------------------------------------------------
-	-- SPEED
-	------------------------------------------------
-
-	local CurrentSpeed =
-		Config.Speed
-
-	if Config.Boost then
-
-		CurrentSpeed =
-			CurrentSpeed
-			* Config.BoostMultiplier
-
-	end
-
-	------------------------------------------------
-	-- HORIZONTAL
-	------------------------------------------------
-
-	local HorizontalVelocity =
-		MoveDirection
-		* CurrentSpeed
-
-	------------------------------------------------
-	-- VERTICAL
-	------------------------------------------------
-
-	local VerticalInput = 0
-
-	if UpHeld then
-		VerticalInput += 1
-	end
-
-	if DownHeld then
-		VerticalInput -= 1
-	end
-
-	local VerticalVelocity =
-		Vector3.new(
-			0,
-			VerticalInput
-				* Config.VerticalSpeed,
-			0
-		)
-
-	------------------------------------------------
-	-- TARGET
-	------------------------------------------------
-
-	local TargetVelocity =
-		HorizontalVelocity
-		+ VerticalVelocity
-
-	------------------------------------------------
-	-- ACCELERATION / BRAKING
-	------------------------------------------------
-
-	local Rate
-
-	if TargetVelocity.Magnitude
-		> CurrentVelocity.Magnitude
-	then
-
-		Rate =
-			Config.Acceleration
-
-	else
-
-		Rate =
-			Config.Deceleration
-
-	end
-
-	local Alpha =
-		smoothAlpha(
-			Rate,
-			dt
-		)
+local function hardBrake()
 
 	CurrentVelocity =
-		CurrentVelocity:Lerp(
-			TargetVelocity,
-			Alpha
-		)
+		Vector3.zero
 
-	------------------------------------------------
-	-- TRUE STOP / HOVER
-	------------------------------------------------
+	if LinearVelocity then
 
-	if TargetVelocity.Magnitude == 0
-		and CurrentVelocity.Magnitude
-		< Config.StopThreshold
-	then
+		LinearVelocity.VectorVelocity =
+			Vector3.zero
+	end
 
-		CurrentVelocity =
+	if Root then
+
+		Root.AssemblyLinearVelocity =
 			Vector3.zero
 
+		Root.AssemblyAngularVelocity =
+			Vector3.zero
 	end
-
-	Velocity.VectorVelocity =
-		CurrentVelocity
-
-	------------------------------------------------
-	-- KEEP UPRIGHT
-	------------------------------------------------
-
-	local DesiredDirection
-
-	if Config.FaceCamera then
-
-		local Camera =
-			workspace.CurrentCamera
-
-		if Camera then
-
-			local CameraLook =
-				Camera.CFrame.LookVector
-
-			local FlatLook =
-				Vector3.new(
-					CameraLook.X,
-					0,
-					CameraLook.Z
-				)
-
-			if FlatLook.Magnitude > 0.01 then
-
-				DesiredDirection =
-					FlatLook.Unit
-
-			end
-		end
-
-	elseif MoveDirection.Magnitude > 0.05 then
-
-		local FlatMove =
-			Vector3.new(
-				MoveDirection.X,
-				0,
-				MoveDirection.Z
-			)
-
-		if FlatMove.Magnitude > 0.01 then
-			DesiredDirection =
-				FlatMove.Unit
-		end
-	end
-
-	if not DesiredDirection then
-
-		local Look =
-			Root.CFrame.LookVector
-
-		local Flat =
-			Vector3.new(
-				Look.X,
-				0,
-				Look.Z
-			)
-
-		if Flat.Magnitude > 0.01 then
-			DesiredDirection = Flat.Unit
-		else
-			DesiredDirection =
-				Vector3.new(0, 0, -1)
-		end
-	end
-
-	Orientation.CFrame =
-		CFrame.lookAt(
-			Vector3.zero,
-			DesiredDirection,
-			Vector3.yAxis
-		)
-end)
-
---------------------------------------------------
--- NOCLIP LOOP
---------------------------------------------------
-
-RunService.Stepped:Connect(function()
-
-	if Config.Flying
-		and Config.NoClip
-	then
-
-		applyNoClip()
-
-	end
-end)
+end
 
 --------------------------------------------------
 -- RESPAWN
@@ -654,37 +904,51 @@ end)
 Player.CharacterAdded:Connect(
 	function(character)
 
-		local ShouldFly =
+		local resume =
 			Config.Flying
 
-		bindCharacter(character)
+		if PhysicsConnection then
+			PhysicsConnection:Disconnect()
+			PhysicsConnection = nil
+		end
+
+		if NoClipConnection then
+			NoClipConnection:Disconnect()
+			NoClipConnection = nil
+		end
+
+		setCharacter(character)
 
 		task.wait(0.5)
 
-		if ShouldFly then
+		if resume then
 			enableFly()
 		end
 	end
 )
 
 --------------------------------------------------
--- GUI
+-- GUI CLEANUP
 --------------------------------------------------
 
-local OldGUI =
+local old =
 	PlayerGui:FindFirstChild(
-		"AdvancedMobileFlyV2"
+		"UltraMobileFly"
 	)
 
-if OldGUI then
-	OldGUI:Destroy()
+if old then
+	old:Destroy()
 end
+
+--------------------------------------------------
+-- GUI
+--------------------------------------------------
 
 local GUI =
 	Instance.new("ScreenGui")
 
 GUI.Name =
-	"AdvancedMobileFlyV2"
+	"UltraMobileFly"
 
 GUI.ResetOnSpawn =
 	false
@@ -704,23 +968,23 @@ local Main =
 
 Main.Size =
 	UDim2.fromOffset(
-		310,
-		350
+		320,
+		430
 	)
 
 Main.Position =
 	UDim2.new(
 		1,
-		-325,
+		-335,
 		0.5,
-		-175
+		-215
 	)
 
 Main.BackgroundColor3 =
 	Color3.fromRGB(
+		15,
 		16,
-		17,
-		23
+		22
 	)
 
 Main.BorderSizePixel =
@@ -743,24 +1007,25 @@ local Stroke =
 
 Stroke.Color =
 	Color3.fromRGB(
-		65,
-		68,
-		85
+		61,
+		64,
+		82
 	)
 
-Stroke.Thickness = 1
+Stroke.Thickness =
+	1
 
 Stroke.Parent =
 	Main
 
 --------------------------------------------------
--- TITLE
+-- HEADER
 --------------------------------------------------
 
-local Top =
+local Header =
 	Instance.new("Frame")
 
-Top.Size =
+Header.Size =
 	UDim2.new(
 		1,
 		0,
@@ -768,13 +1033,13 @@ Top.Size =
 		48
 	)
 
-Top.BackgroundTransparency =
+Header.BackgroundTransparency =
 	1
 
-Top.Active =
+Header.Active =
 	true
 
-Top.Parent =
+Header.Parent =
 	Main
 
 local Title =
@@ -798,7 +1063,13 @@ Title.BackgroundTransparency =
 	1
 
 Title.Text =
-	"ADVANCED MOBILE FLY"
+	"MOBILE FLY V4"
+
+Title.Font =
+	Enum.Font.GothamBold
+
+Title.TextSize =
+	17
 
 Title.TextColor3 =
 	Color3.fromRGB(
@@ -807,79 +1078,85 @@ Title.TextColor3 =
 		250
 	)
 
-Title.Font =
-	Enum.Font.GothamBold
-
-Title.TextSize =
-	16
-
 Title.TextXAlignment =
 	Enum.TextXAlignment.Left
 
 Title.Parent =
-	Top
+	Header
 
 --------------------------------------------------
--- BUTTON HELPER
+-- BUTTON FUNCTION
 --------------------------------------------------
 
-local function makeButton(
+local function createButton(
 	text,
-	position,
-	size
+	x,
+	y,
+	w,
+	h
 )
 
-	local Button =
+	local button =
 		Instance.new("TextButton")
 
-	Button.Text =
-		text
-
-	Button.Position =
-		position
-
-	Button.Size =
-		size
-
-	Button.BackgroundColor3 =
-		Color3.fromRGB(
-			36,
-			38,
-			50
+	button.Position =
+		UDim2.new(
+			0,
+			x,
+			0,
+			y
 		)
 
-	Button.TextColor3 =
+	button.Size =
+		UDim2.new(
+			0,
+			w,
+			0,
+			h
+		)
+
+	button.BackgroundColor3 =
+		Color3.fromRGB(
+			35,
+			37,
+			49
+		)
+
+	button.BorderSizePixel =
+		0
+
+	button.Text =
+		text
+
+	button.TextColor3 =
 		Color3.fromRGB(
 			245,
 			245,
 			250
 		)
 
-	Button.Font =
-		Enum.Font.GothamMedium
-
-	Button.TextSize =
+	button.TextSize =
 		14
 
-	Button.BorderSizePixel =
-		0
+	button.Font =
+		Enum.Font.GothamMedium
 
-	Button.AutoButtonColor =
+	button.AutoButtonColor =
 		true
 
-	Button.Parent =
+	button.Parent =
 		Main
 
-	local C =
+	local corner =
 		Instance.new("UICorner")
 
-	C.CornerRadius =
+	corner.CornerRadius =
 		UDim.new(0, 10)
 
-	C.Parent =
-		Button
+	corner.Parent =
+		button
 
-	return Button
+	return button
 end
 
 --------------------------------------------------
@@ -887,18 +1164,12 @@ end
 --------------------------------------------------
 
 local Minimize =
-	makeButton(
+	createButton(
 		"—",
-		UDim2.new(
-			1,
-			-46,
-			0,
-			8
-		),
-		UDim2.fromOffset(
-			36,
-			32
-		)
+		274,
+		8,
+		36,
+		32
 	)
 
 --------------------------------------------------
@@ -906,18 +1177,12 @@ local Minimize =
 --------------------------------------------------
 
 local FlyButton =
-	makeButton(
+	createButton(
 		"FLY: OFF",
-		UDim2.fromOffset(
-			12,
-			52
-		),
-		UDim2.new(
-			1,
-			-24,
-			0,
-			44
-		)
+		12,
+		53,
+		296,
+		44
 	)
 
 local function updateFlyButton()
@@ -929,9 +1194,9 @@ local function updateFlyButton()
 
 		FlyButton.BackgroundColor3 =
 			Color3.fromRGB(
-				34,
-				145,
-				82
+				35,
+				150,
+				85
 			)
 
 	else
@@ -941,11 +1206,10 @@ local function updateFlyButton()
 
 		FlyButton.BackgroundColor3 =
 			Color3.fromRGB(
-				36,
-				38,
-				50
+				35,
+				37,
+				49
 			)
-
 	end
 end
 
@@ -966,28 +1230,22 @@ FlyButton.Activated:Connect(
 -- NOCLIP
 --------------------------------------------------
 
-local NoClipButton =
-	makeButton(
+local NoClip =
+	createButton(
 		"NOCLIP: OFF",
-		UDim2.fromOffset(
-			12,
-			105
-		),
-		UDim2.new(
-			0.48,
-			-12,
-			0,
-			40
-		)
+		12,
+		106,
+		143,
+		40
 	)
 
-NoClipButton.Activated:Connect(
+NoClip.Activated:Connect(
 	function()
 
 		Config.NoClip =
 			not Config.NoClip
 
-		NoClipButton.Text =
+		NoClip.Text =
 			Config.NoClip
 			and "NOCLIP: ON"
 			or "NOCLIP: OFF"
@@ -1002,67 +1260,81 @@ NoClipButton.Activated:Connect(
 -- BOOST
 --------------------------------------------------
 
-local BoostButton =
-	makeButton(
+local Boost =
+	createButton(
 		"BOOST: OFF",
-		UDim2.new(
-			0.52,
-			0,
-			0,
-			105
-		),
-		UDim2.new(
-			0.48,
-			-12,
-			0,
-			40
-		)
+		165,
+		106,
+		143,
+		40
 	)
 
-BoostButton.Activated:Connect(
+Boost.Activated:Connect(
 	function()
 
 		Config.Boost =
 			not Config.Boost
 
-		BoostButton.Text =
+		Boost.Text =
 			Config.Boost
 			and "BOOST: ON"
 			or "BOOST: OFF"
-
 	end
 )
 
 --------------------------------------------------
--- CAMERA
+-- CAMERA 3D
 --------------------------------------------------
 
-local CameraButton =
-	makeButton(
-		"OLHAR: CÂMERA",
-		UDim2.fromOffset(
-			12,
-			153
-		),
-		UDim2.new(
-			1,
-			-24,
-			0,
-			38
-		)
+local Camera3D =
+	createButton(
+		"CAMERA 3D: OFF",
+		12,
+		155,
+		143,
+		40
 	)
 
-CameraButton.Activated:Connect(
+Camera3D.Activated:Connect(
 	function()
 
-		Config.FaceCamera =
-			not Config.FaceCamera
+		Config.Camera3D =
+			not Config.Camera3D
 
-		CameraButton.Text =
-			Config.FaceCamera
-			and "OLHAR: CÂMERA"
-			or "OLHAR: MOVIMENTO"
+		Camera3D.Text =
+			Config.Camera3D
+			and "CAMERA 3D: ON"
+			or "CAMERA 3D: OFF"
+	end
+)
 
+--------------------------------------------------
+-- HOVER
+--------------------------------------------------
+
+local Hover =
+	createButton(
+		"HOVER: OFF",
+		165,
+		155,
+		143,
+		40
+	)
+
+Hover.Activated:Connect(
+	function()
+
+		Config.Hover =
+			not Config.Hover
+
+		if Config.Hover then
+			hardBrake()
+		end
+
+		Hover.Text =
+			Config.Hover
+			and "HOVER: ON"
+			or "HOVER: OFF"
 	end
 )
 
@@ -1070,70 +1342,48 @@ CameraButton.Activated:Connect(
 -- SPEED
 --------------------------------------------------
 
-local Minus =
-	makeButton(
+local SpeedMinus =
+	createButton(
 		"−",
-		UDim2.fromOffset(
-			12,
-			200
-		),
-		UDim2.fromOffset(
-			50,
-			40
-		)
+		12,
+		204,
+		48,
+		40
 	)
 
-local SpeedLabel =
-	makeButton(
-		"VELOCIDADE: "
+local SpeedText =
+	createButton(
+		"SPEED: "
 			.. Config.Speed,
-
-		UDim2.fromOffset(
-			68,
-			200
-		),
-
-		UDim2.new(
-			1,
-			-136,
-			0,
-			40
-		)
+		68,
+		204,
+		184,
+		40
 	)
 
-local Plus =
-	makeButton(
+local SpeedPlus =
+	createButton(
 		"+",
-		UDim2.new(
-			1,
-			-62,
-			0,
-			200
-		),
-		UDim2.fromOffset(
-			50,
-			40
-		)
+		260,
+		204,
+		48,
+		40
 	)
 
 local function updateSpeed()
 
-	SpeedLabel.Text =
-		"VELOCIDADE: "
-		.. math.floor(
-			Config.Speed
-		)
-
+	SpeedText.Text =
+		"SPEED: "
+		.. Config.Speed
 end
 
-Minus.Activated:Connect(
+SpeedMinus.Activated:Connect(
 	function()
 
 		Config.Speed =
 			math.clamp(
 				Config.Speed
-				- Config.SpeedStep,
-
+					- Config.SpeedStep,
 				Config.MinSpeed,
 				Config.MaxSpeed
 			)
@@ -1142,14 +1392,13 @@ Minus.Activated:Connect(
 	end
 )
 
-Plus.Activated:Connect(
+SpeedPlus.Activated:Connect(
 	function()
 
 		Config.Speed =
 			math.clamp(
 				Config.Speed
-				+ Config.SpeedStep,
-
+					+ Config.SpeedStep,
 				Config.MinSpeed,
 				Config.MaxSpeed
 			)
@@ -1159,87 +1408,120 @@ Plus.Activated:Connect(
 )
 
 --------------------------------------------------
--- VERTICAL BUTTONS
+-- VERTICAL SPEED
+--------------------------------------------------
+
+local VMinus =
+	createButton(
+		"−",
+		12,
+		253,
+		48,
+		40
+	)
+
+local VText =
+	createButton(
+		"VERTICAL: "
+			.. Config.VerticalSpeed,
+		68,
+		253,
+		184,
+		40
+	)
+
+local VPlus =
+	createButton(
+		"+",
+		260,
+		253,
+		48,
+		40
+	)
+
+local function updateVertical()
+
+	VText.Text =
+		"VERTICAL: "
+		.. Config.VerticalSpeed
+end
+
+VMinus.Activated:Connect(
+	function()
+
+		Config.VerticalSpeed =
+			math.clamp(
+				Config.VerticalSpeed
+					- Config.VerticalStep,
+				Config.MinVertical,
+				Config.MaxVertical
+			)
+
+		updateVertical()
+	end
+)
+
+VPlus.Activated:Connect(
+	function()
+
+		Config.VerticalSpeed =
+			math.clamp(
+				Config.VerticalSpeed
+					+ Config.VerticalStep,
+				Config.MinVertical,
+				Config.MaxVertical
+			)
+
+		updateVertical()
+	end
+)
+
+--------------------------------------------------
+-- UP/DOWN
 --------------------------------------------------
 
 local Up =
-	makeButton(
+	createButton(
 		"▲ SUBIR",
-		UDim2.fromOffset(
-			12,
-			249
-		),
-		UDim2.new(
-			0.5,
-			-18,
-			0,
-			50
-		)
+		12,
+		302,
+		143,
+		54
 	)
 
 local Down =
-	makeButton(
+	createButton(
 		"▼ DESCER",
-		UDim2.new(
-			0.5,
-			6,
-			0,
-			249
-		),
-		UDim2.new(
-			0.5,
-			-18,
-			0,
-			50
-		)
+		165,
+		302,
+		143,
+		54
 	)
 
 --------------------------------------------------
--- MOBILE HOLD SYSTEM
+-- HOLD SYSTEM
 --------------------------------------------------
 
 local function bindHold(
 	button,
-	setter
+	callback
 )
 
-	local ActiveInput = nil
+	local active = {}
 
 	button.InputBegan:Connect(
 		function(input)
 
-			if
-				input.UserInputType
-					== Enum.UserInputType.Touch
+			if input.UserInputType
+				== Enum.UserInputType.Touch
 				or
 				input.UserInputType
-					== Enum.UserInputType.MouseButton1
+				== Enum.UserInputType.MouseButton1
 			then
 
-				ActiveInput = input
+				active[input] = true
 
-				setter(true)
-
-				input.Changed:Connect(
-					function()
-
-						if
-							input.UserInputState
-							== Enum.UserInputState.End
-						then
-
-							if ActiveInput
-								== input
-							then
-
-								ActiveInput =
-									nil
-
-								setter(false)
-							end
-						end
-					end
-				)
+				callback(true)
 			end
 		end
 	)
@@ -1247,12 +1529,11 @@ local function bindHold(
 	button.InputEnded:Connect(
 		function(input)
 
-			if input == ActiveInput then
+			if active[input] then
 
-				ActiveInput =
-					nil
+				active[input] = nil
 
-				setter(false)
+				callback(false)
 			end
 		end
 	)
@@ -1261,14 +1542,28 @@ end
 bindHold(
 	Up,
 	function(value)
+
 		UpHeld = value
+
+		if value then
+			Config.Hover = false
+			Hover.Text =
+				"HOVER: OFF"
+		end
 	end
 )
 
 bindHold(
 	Down,
 	function(value)
+
 		DownHeld = value
+
+		if value then
+			Config.Hover = false
+			Hover.Text =
+				"HOVER: OFF"
+		end
 	end
 )
 
@@ -1277,42 +1572,23 @@ bindHold(
 --------------------------------------------------
 
 local Brake =
-	makeButton(
-		"PARAR NO AR",
-		UDim2.fromOffset(
-			12,
-			307
-		),
-		UDim2.new(
-			1,
-			-24,
-			0,
-			32
-		)
+	createButton(
+		"PARAR IMEDIATAMENTE",
+		12,
+		365,
+		296,
+		42
 	)
 
 Brake.Activated:Connect(
 	function()
 
-		CurrentVelocity =
-			Vector3.zero
+		Config.Hover = true
 
-		if Velocity then
+		Hover.Text =
+			"HOVER: ON"
 
-			Velocity.VectorVelocity =
-				Vector3.zero
-
-		end
-
-		if Root then
-
-			Root.AssemblyLinearVelocity =
-				Vector3.zero
-
-			Root.AssemblyAngularVelocity =
-				Vector3.zero
-
-		end
+		hardBrake()
 	end
 )
 
@@ -1320,24 +1596,10 @@ Brake.Activated:Connect(
 -- MINIMIZE
 --------------------------------------------------
 
-local NormalSize =
+local Minimized = false
+
+local OriginalSize =
 	Main.Size
-
-local Minimized =
-	false
-
-for _, item in ipairs(
-	Main:GetChildren()
-) do
-
-	if item:IsA("GuiObject")
-		and item ~= Top
-		and item ~= Minimize
-	then
-
-		-- handled later
-	end
-end
 
 Minimize.Activated:Connect(
 	function()
@@ -1345,16 +1607,16 @@ Minimize.Activated:Connect(
 		Minimized =
 			not Minimized
 
-		for _, item in ipairs(
+		for _, object in ipairs(
 			Main:GetChildren()
 		) do
 
-			if item:IsA("GuiObject")
-				and item ~= Top
-				and item ~= Minimize
+			if object:IsA("GuiObject")
+				and object ~= Header
+				and object ~= Minimize
 			then
 
-				item.Visible =
+				object.Visible =
 					not Minimized
 			end
 		end
@@ -1363,7 +1625,7 @@ Minimize.Activated:Connect(
 
 			Main.Size =
 				UDim2.fromOffset(
-					310,
+					320,
 					48
 				)
 
@@ -1372,10 +1634,9 @@ Minimize.Activated:Connect(
 		else
 
 			Main.Size =
-				NormalSize
+				OriginalSize
 
 			Minimize.Text = "—"
-
 		end
 	end
 )
@@ -1389,30 +1650,33 @@ local DragInput
 local DragStart
 local StartPosition
 
-Top.InputBegan:Connect(
+Header.InputBegan:Connect(
 	function(input)
 
-		if
-			input.UserInputType
-				== Enum.UserInputType.Touch
+		if input.UserInputType
+			== Enum.UserInputType.Touch
 			or
 			input.UserInputType
-				== Enum.UserInputType.MouseButton1
+			== Enum.UserInputType.MouseButton1
 		then
 
 			Dragging = true
-			DragStart = input.Position
-			StartPosition = Main.Position
+
+			DragStart =
+				input.Position
+
+			StartPosition =
+				Main.Position
 
 			input.Changed:Connect(
 				function()
 
-					if
-						input.UserInputState
+					if input.UserInputState
 						== Enum.UserInputState.End
 					then
 
-						Dragging = false
+						Dragging =
+							false
 					end
 				end
 			)
@@ -1420,18 +1684,18 @@ Top.InputBegan:Connect(
 	end
 )
 
-Top.InputChanged:Connect(
+Header.InputChanged:Connect(
 	function(input)
 
-		if
-			input.UserInputType
-				== Enum.UserInputType.Touch
+		if input.UserInputType
+			== Enum.UserInputType.Touch
 			or
 			input.UserInputType
-				== Enum.UserInputType.MouseMovement
+			== Enum.UserInputType.MouseMovement
 		then
 
-			DragInput = input
+			DragInput =
+				input
 		end
 	end
 )
@@ -1443,7 +1707,7 @@ UIS.InputChanged:Connect(
 			and input == DragInput
 		then
 
-			local Delta =
+			local delta =
 				input.Position
 				- DragStart
 
@@ -1451,12 +1715,34 @@ UIS.InputChanged:Connect(
 				UDim2.new(
 					StartPosition.X.Scale,
 					StartPosition.X.Offset
-						+ Delta.X,
+						+ delta.X,
 
 					StartPosition.Y.Scale,
 					StartPosition.Y.Offset
-						+ Delta.Y
+						+ delta.Y
 				)
+		end
+	end
+)
+
+--------------------------------------------------
+-- SAFETY: TOUCH RELEASE
+--------------------------------------------------
+
+UIS.InputEnded:Connect(
+	function(input)
+
+		if input.UserInputType
+			== Enum.UserInputType.Touch
+		then
+
+			-- Evita ficar subindo eternamente
+			-- se o Roblox perder o evento do botão.
+
+			if not UIS.TouchEnabled then
+				UpHeld = false
+				DownHeld = false
+			end
 		end
 	end
 )
