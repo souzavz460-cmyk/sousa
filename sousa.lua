@@ -1,1075 +1,892 @@
 --[[
-    ADVANCED MOBILE FLY V4
-    Roblox Studio - LocalScript
+    ============================================================
+                    ULTRA NOCLIP - LOCAL V1
+    ============================================================
 
-    Coloque em:
-    StarterPlayer > StarterPlayerScripts
+    Feito para uso no SEU próprio jogo no Roblox Studio.
 
-    IMPORTANTE:
-    Apague/desative qualquer Fly antigo antes de testar.
+    LOCAL:
+    StarterPlayer
+        > StarterPlayerScripts
+            > LocalScript
 
-    MOBILE:
-    • Analógico = movimentação
-    • SUBIR / DESCER = segurar
-    • CAMERA 3D = voa na direção que a câmera olha
-    • HOVER = parada extremamente estável
+    RECURSOS:
+    - 100% LocalScript
+    - GUI simples
+    - PC + Mobile
+    - Tecla N liga/desliga
+    - RightShift esconde/mostra GUI
+    - Respawn automático
+    - R6 / R15 / rigs customizados
+    - Detecta novas partes automaticamente
+    - Detecta acessórios e Tools equipadas
+    - Preserva CanCollide original de cada peça
+    - Restaura corretamente quando desligado
+    - PreSimulation enforcement
+    - PropertyChanged enforcement
+    - Safe Exit
+    - Anti-stuck básico
+    - GUI arrastável
+    - Não mexe em CanTouch/CanQuery
+    - Limpeza automática
+
+    ============================================================
 ]]
 
---------------------------------------------------
+------------------------------------------------------------
 -- SERVICES
---------------------------------------------------
+------------------------------------------------------------
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
+local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+------------------------------------------------------------
+-- PLAYER
+------------------------------------------------------------
 
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
-local Camera = workspace.CurrentCamera
 
---------------------------------------------------
+------------------------------------------------------------
 -- CONFIG
---------------------------------------------------
+------------------------------------------------------------
 
-local Config = {
+local CONFIG = {
 
-	Flying = false,
+	-- N = ativar/desativar noclip
+	ToggleKey = Enum.KeyCode.N,
 
-	NoClip = false,
-	Camera3D = false,
-	FaceDirection = true,
+	-- RightShift = esconder/mostrar interface
+	GuiKey = Enum.KeyCode.RightShift,
 
-	Boost = false,
-	Hover = false,
+	-- Confere se você ainda está dentro de uma parede
+	-- antes de restaurar colisão.
+	SafeExit = true,
 
-	Speed = 65,
-	VerticalSpeed = 50,
+	-- Intervalo da verificação de saída segura.
+	SafeCheckInterval = 0.10,
 
-	MinSpeed = 10,
-	MaxSpeed = 300,
+	-- Reduz um pouco a caixa usada para detectar se
+	-- o personagem está realmente dentro de uma parede.
+	SafeBoxScale = 0.78,
 
-	MinVertical = 10,
-	MaxVertical = 200,
+	-- Quantidade máxima de objetos considerados
+	-- por cada verificação.
+	SafeMaxParts = 100,
 
-	SpeedStep = 10,
-	VerticalStep = 10,
-
-	BoostMultiplier = 2,
-
-	Acceleration = 8,
-	Braking = 12,
-	VerticalAcceleration = 10,
-
-	RotationResponsiveness = 25,
-
-	Deadzone = 0.025,
+	-- Reaplica CanCollide=false antes da física.
+	PreSimulationEnforcement = true,
 }
 
---------------------------------------------------
--- VARIABLES
---------------------------------------------------
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
 
-local Character
-local Humanoid
-local Root
+local State = {
 
-local FlyAttachment
-local LinearVelocity
-local AlignOrientation
+	-- OFF
+	-- ON
+	-- EXITING
+	Mode = "OFF",
 
-local CurrentVelocity = Vector3.zero
+	Character = nil,
 
-local UpHeld = false
-local DownHeld = false
+	GuiVisible = true,
 
-local Original = {}
+	TrackedCount = 0,
 
-local CollisionBackup = {}
+	ExitAccumulator = 0,
+}
 
-local RenderConnection
-local PhysicsConnection
-local NoClipConnection
+------------------------------------------------------------
+-- TABELAS
+------------------------------------------------------------
 
---------------------------------------------------
--- MATH
---------------------------------------------------
+-- weak tables:
+-- se uma Part for destruída, ela pode ser coletada
+-- automaticamente pelo garbage collector.
 
-local function expAlpha(rate, dt)
-	return 1 - math.exp(-rate * dt)
+local OriginalState = setmetatable({}, {
+	__mode = "k"
+})
+
+local PartConnections = setmetatable({}, {
+	__mode = "k"
+})
+
+local CharacterConnections = {}
+
+------------------------------------------------------------
+-- FORWARD DECLARATIONS
+------------------------------------------------------------
+
+local updateUI
+local enableNoclip
+local disableNoclip
+local toggleNoclip
+local bindCharacter
+
+------------------------------------------------------------
+-- CONNECTION UTILS
+------------------------------------------------------------
+
+local function disconnect(connection)
+
+	if connection then
+		connection:Disconnect()
+	end
 end
 
-local function flatVector(v)
+local function disconnectCharacterConnections()
 
-	local result = Vector3.new(
-		v.X,
-		0,
-		v.Z
-	)
+	for _, connection in ipairs(CharacterConnections) do
 
-	if result.Magnitude > 0.001 then
-		return result.Unit
+		if connection then
+			connection:Disconnect()
+		end
 	end
 
-	return Vector3.zero
+	table.clear(CharacterConnections)
 end
 
---------------------------------------------------
--- CHARACTER
---------------------------------------------------
+------------------------------------------------------------
+-- CHARACTER VALIDATION
+------------------------------------------------------------
 
-local function setCharacter(character)
+local function isCurrentCharacterPart(part)
 
-	Character = character
+	if not State.Character then
+		return false
+	end
 
-	Humanoid =
-		character:WaitForChild("Humanoid")
+	if not part then
+		return false
+	end
 
-	Root =
-		character:WaitForChild("HumanoidRootPart")
+	if not part:IsA("BasePart") then
+		return false
+	end
 
-	CurrentVelocity = Vector3.zero
-
-	FlyAttachment = nil
-	LinearVelocity = nil
-	AlignOrientation = nil
-
-	CollisionBackup = {}
-
-	-- Nunca permitimos que o Fly deixe isso ligado.
-	Humanoid.PlatformStand = false
+	return part:IsDescendantOf(State.Character)
 end
 
-setCharacter(
-	Player.Character
-	or Player.CharacterAdded:Wait()
-)
+------------------------------------------------------------
+-- COUNT TRACKED PARTS
+------------------------------------------------------------
 
---------------------------------------------------
--- BACKUP HUMANOID
---------------------------------------------------
+local function recountParts()
 
-local function backupHumanoid()
+	local count = 0
 
-	if not Humanoid then
+	for part in pairs(OriginalState) do
+
+		if part and part.Parent then
+			count += 1
+		end
+	end
+
+	State.TrackedCount = count
+end
+
+------------------------------------------------------------
+-- STORE ORIGINAL STATE
+------------------------------------------------------------
+
+local function saveOriginalState(part)
+
+	if OriginalState[part] ~= nil then
 		return
 	end
 
-	Original = {
+	OriginalState[part] = {
 
-		WalkSpeed =
-			Humanoid.WalkSpeed,
-
-		AutoRotate =
-			Humanoid.AutoRotate,
-
-		UseJumpPower =
-			Humanoid.UseJumpPower,
-
-		JumpPower =
-			Humanoid.JumpPower,
-
-		JumpHeight =
-			Humanoid.JumpHeight,
+		CanCollide = part.CanCollide,
 	}
 end
 
---------------------------------------------------
--- PREPARE HUMANOID
---------------------------------------------------
+------------------------------------------------------------
+-- ENFORCE ONE PART
+------------------------------------------------------------
 
-local function prepareHumanoid()
+local function enforcePart(part)
 
-	if not Humanoid then
+	if State.Mode == "OFF" then
 		return
 	end
 
-	backupHumanoid()
-
-	------------------------------------------------
-	-- IMPORTANTE
-	--
-	-- Não usamos:
-	--
-	-- PlatformStand
-	-- Physics
-	-- Freefall forçado
-	-- SetStateEnabled
-	-- Ragdoll modification
-	--
-	------------------------------------------------
-
-	Humanoid.PlatformStand = false
-
-	-- Impede a caminhada padrão de competir
-	-- contra o Fly.
-	Humanoid.WalkSpeed = 0
-
-	-- A rotação será controlada por AlignOrientation.
-	Humanoid.AutoRotate = false
-
-	-- Evita o botão Jump dando impulsos durante Fly.
-	if Humanoid.UseJumpPower then
-		Humanoid.JumpPower = 0
-	else
-		Humanoid.JumpHeight = 0
-	end
-
-	Humanoid.Jump = false
-end
-
---------------------------------------------------
--- RESTORE HUMANOID
---------------------------------------------------
-
-local function restoreHumanoid()
-
-	if not Humanoid then
+	if not isCurrentCharacterPart(part) then
 		return
 	end
 
-	Humanoid.PlatformStand = false
-
-	if Original.WalkSpeed ~= nil then
-		Humanoid.WalkSpeed =
-			Original.WalkSpeed
-	end
-
-	if Original.AutoRotate ~= nil then
-		Humanoid.AutoRotate =
-			Original.AutoRotate
-	end
-
-	if Original.UseJumpPower ~= nil then
-		Humanoid.UseJumpPower =
-			Original.UseJumpPower
-	end
-
-	if Original.JumpPower ~= nil then
-		Humanoid.JumpPower =
-			Original.JumpPower
-	end
-
-	if Original.JumpHeight ~= nil then
-		Humanoid.JumpHeight =
-			Original.JumpHeight
-	end
-
-	Original = {}
-end
-
---------------------------------------------------
--- CREATE FLY PHYSICS
---------------------------------------------------
-
-local function createFlyPhysics()
-
-	if not Root then
-		return
-	end
-
-	------------------------------------------------
-	-- ATTACHMENT
-	------------------------------------------------
-
-	FlyAttachment =
-		Root:FindFirstChild(
-			"AdvancedFlyAttachmentV4"
-		)
-
-	if not FlyAttachment then
-
-		FlyAttachment =
-			Instance.new("Attachment")
-
-		FlyAttachment.Name =
-			"AdvancedFlyAttachmentV4"
-
-		FlyAttachment.Parent =
-			Root
-	end
-
-	------------------------------------------------
-	-- LINEAR VELOCITY
-	------------------------------------------------
-
-	LinearVelocity =
-		Root:FindFirstChild(
-			"AdvancedFlyVelocityV4"
-		)
-
-	if not LinearVelocity then
-
-		LinearVelocity =
-			Instance.new("LinearVelocity")
-
-		LinearVelocity.Name =
-			"AdvancedFlyVelocityV4"
-
-		LinearVelocity.Attachment0 =
-			FlyAttachment
-
-		LinearVelocity.RelativeTo =
-			Enum.ActuatorRelativeTo.World
-
-		LinearVelocity.VelocityConstraintMode =
-			Enum.VelocityConstraintMode.Vector
-
-		LinearVelocity.VectorVelocity =
-			Vector3.zero
-
-		LinearVelocity.MaxForce =
-			math.huge
-
-		LinearVelocity.Enabled =
-			false
-
-		LinearVelocity.Parent =
-			Root
-	end
-
-	------------------------------------------------
-	-- ORIENTATION
-	------------------------------------------------
-
-	AlignOrientation =
-		Root:FindFirstChild(
-			"AdvancedFlyOrientationV4"
-		)
-
-	if not AlignOrientation then
-
-		AlignOrientation =
-			Instance.new("AlignOrientation")
-
-		AlignOrientation.Name =
-			"AdvancedFlyOrientationV4"
-
-		AlignOrientation.Attachment0 =
-			FlyAttachment
-
-		AlignOrientation.Mode =
-			Enum.OrientationAlignmentMode.OneAttachment
-
-		AlignOrientation.MaxTorque =
-			math.huge
-
-		AlignOrientation.Responsiveness =
-			Config.RotationResponsiveness
-
-		AlignOrientation.RigidityEnabled =
-			false
-
-		AlignOrientation.Enabled =
-			false
-
-		AlignOrientation.Parent =
-			Root
+	if part.CanCollide then
+		part.CanCollide = false
 	end
 end
 
---------------------------------------------------
--- NOCLIP
---------------------------------------------------
+------------------------------------------------------------
+-- WATCH ONE PART
+------------------------------------------------------------
 
-local function applyNoClip()
+local function trackPart(part)
 
-	if not Character then
+	if not part:IsA("BasePart") then
 		return
 	end
 
-	for _, object in ipairs(
-		Character:GetDescendants()
-	) do
+	if not isCurrentCharacterPart(part) then
+		return
+	end
+
+	saveOriginalState(part)
+
+	--------------------------------------------------------
+	-- PROPERTY WATCHER
+	--------------------------------------------------------
+
+	if not PartConnections[part] then
+
+		PartConnections[part] =
+			part:GetPropertyChangedSignal("CanCollide"):Connect(function()
+
+				if State.Mode == "OFF" then
+					return
+				end
+
+				if not isCurrentCharacterPart(part) then
+					return
+				end
+
+				-- Se outro sistema reativar colisão
+				-- enquanto noclip está ligado,
+				-- desativa novamente.
+
+				if part.CanCollide then
+					part.CanCollide = false
+				end
+			end)
+	end
+
+	enforcePart(part)
+
+	recountParts()
+
+	if updateUI then
+		updateUI()
+	end
+end
+
+------------------------------------------------------------
+-- RESTORE ONE PART
+------------------------------------------------------------
+
+local function restorePart(part)
+
+	local original = OriginalState[part]
+
+	if original then
+
+		if part and part.Parent then
+
+			pcall(function()
+
+				part.CanCollide = original.CanCollide
+			end)
+		end
+
+		OriginalState[part] = nil
+	end
+
+	if PartConnections[part] then
+
+		PartConnections[part]:Disconnect()
+		PartConnections[part] = nil
+	end
+end
+
+------------------------------------------------------------
+-- RESTORE EVERYTHING
+------------------------------------------------------------
+
+local function restoreAllParts()
+
+	-- Primeiro deixa o modo OFF para impedir que
+	-- PropertyChanged coloque false novamente.
+
+	State.Mode = "OFF"
+
+	local parts = {}
+
+	for part in pairs(OriginalState) do
+		table.insert(parts, part)
+	end
+
+	for _, part in ipairs(parts) do
+		restorePart(part)
+	end
+
+	State.TrackedCount = 0
+end
+
+------------------------------------------------------------
+-- TRACK WHOLE CHARACTER
+------------------------------------------------------------
+
+local function trackCharacter()
+
+	local character = State.Character
+
+	if not character then
+		return
+	end
+
+	for _, object in ipairs(character:GetDescendants()) do
+
+		if object:IsA("BasePart") then
+			trackPart(object)
+		end
+	end
+end
+
+------------------------------------------------------------
+-- RE-ENFORCE CHARACTER
+------------------------------------------------------------
+
+local function enforceCharacter()
+
+	if State.Mode == "OFF" then
+		return
+	end
+
+	local character = State.Character
+
+	if not character then
+		return
+	end
+
+	for _, object in ipairs(character:GetDescendants()) do
 
 		if object:IsA("BasePart") then
 
-			if CollisionBackup[object] == nil then
-				CollisionBackup[object] =
-					object.CanCollide
-			end
+			-- Caso ainda não esteja registrado,
+			-- registra agora.
 
-			object.CanCollide = false
+			if not OriginalState[object] then
+				trackPart(object)
+			else
+				enforcePart(object)
+			end
 		end
 	end
 end
 
-local function restoreCollision()
+------------------------------------------------------------
+-- SAFE EXIT PARAMETERS
+------------------------------------------------------------
 
-	for part, oldValue in pairs(
-		CollisionBackup
-	) do
+local Overlap = OverlapParams.new()
 
-		if part
-			and part.Parent
+Overlap.FilterType = Enum.RaycastFilterType.Exclude
+Overlap.MaxParts = CONFIG.SafeMaxParts
+Overlap.RespectCanCollide = true
+
+------------------------------------------------------------
+-- CHECK IF CHARACTER IS INSIDE SOLID PART
+------------------------------------------------------------
+
+local function characterInsideSolid()
+
+	local character = State.Character
+
+	if not character then
+		return false
+	end
+
+	Overlap.FilterDescendantsInstances = {
+		character
+	}
+
+	for _, object in ipairs(character:GetDescendants()) do
+
+		if object:IsA("BasePart") then
+
+			------------------------------------------------
+			-- Ignora peças absurdamente pequenas
+			------------------------------------------------
+
+			if object.Size.Magnitude > 0.15 then
+
+				local scale = CONFIG.SafeBoxScale
+
+				local size = Vector3.new(
+
+					math.max(
+						object.Size.X * scale,
+						0.05
+					),
+
+					math.max(
+						object.Size.Y * scale,
+						0.05
+					),
+
+					math.max(
+						object.Size.Z * scale,
+						0.05
+					)
+				)
+
+				local success, hits = pcall(function()
+
+					return Workspace:GetPartBoundsInBox(
+						object.CFrame,
+						size,
+						Overlap
+					)
+				end)
+
+				if success then
+
+					for _, hit in ipairs(hits) do
+
+						if hit
+							and hit:IsA("BasePart")
+							and hit.CanCollide
+							and not hit:IsDescendantOf(character)
+						then
+
+							return true
+						end
+					end
+				end
+			end
+		end
+	end
+
+	return false
+end
+
+------------------------------------------------------------
+-- CHARACTER DESCENDANT ADDED
+------------------------------------------------------------
+
+local function onDescendantAdded(object)
+
+	if not object:IsA("BasePart") then
+		return
+	end
+
+	if State.Mode ~= "OFF" then
+
+		-- defer ajuda especialmente com acessórios
+		-- sendo montados no character.
+
+		task.defer(function()
+
+			if object.Parent
+				and State.Character
+				and object:IsDescendantOf(State.Character)
+			then
+
+				trackPart(object)
+			end
+		end)
+	end
+end
+
+------------------------------------------------------------
+-- CHARACTER DESCENDANT REMOVING
+------------------------------------------------------------
+
+local function onDescendantRemoving(object)
+
+	if not object:IsA("BasePart") then
+		return
+	end
+
+	if not OriginalState[object] then
+		return
+	end
+
+	-- O evento ocorre durante a mudança de parent.
+	-- Esperamos um ciclo para descobrir se realmente
+	-- saiu do personagem.
+
+	task.defer(function()
+
+		if not object.Parent then
+
+			restorePart(object)
+
+		elseif not State.Character
+			or not object:IsDescendantOf(State.Character)
 		then
 
-			part.CanCollide =
-				oldValue
+			restorePart(object)
 		end
-	end
 
-	CollisionBackup = {}
+		recountParts()
+
+		if updateUI then
+			updateUI()
+		end
+	end)
 end
 
---------------------------------------------------
--- GET MOBILE MOVEMENT
---------------------------------------------------
+------------------------------------------------------------
+-- BIND CHARACTER
+------------------------------------------------------------
 
-local function getMovement()
+bindCharacter = function(character)
 
-	if not Humanoid then
-		return Vector3.zero
+	disconnectCharacterConnections()
+
+	--------------------------------------------------------
+	-- Limpa referências anteriores
+	--------------------------------------------------------
+
+	for part, connection in pairs(PartConnections) do
+
+		if connection then
+			connection:Disconnect()
+		end
+
+		PartConnections[part] = nil
 	end
 
-	local move =
-		Humanoid.MoveDirection
+	table.clear(OriginalState)
 
-	if move.Magnitude <
-		Config.Deadzone
-	then
+	State.Character = character
+	State.TrackedCount = 0
 
-		return Vector3.zero
-	end
+	--------------------------------------------------------
+	-- Descendants dinâmicos
+	--------------------------------------------------------
 
-	------------------------------------------------
-	-- NORMAL MODE
-	------------------------------------------------
+	table.insert(
+		CharacterConnections,
 
-	if not Config.Camera3D then
-
-		return move
-
-	end
-
-	------------------------------------------------
-	-- CAMERA 3D
-	--
-	-- Descobre quanto do joystick representa
-	-- frente/trás e esquerda/direita.
-	--
-	------------------------------------------------
-
-	Camera =
-		workspace.CurrentCamera
-
-	if not Camera then
-		return move
-	end
-
-	local cameraForwardFlat =
-		flatVector(
-			Camera.CFrame.LookVector
+		character.DescendantAdded:Connect(
+			onDescendantAdded
 		)
+	)
 
-	local cameraRightFlat =
-		flatVector(
-			Camera.CFrame.RightVector
+	table.insert(
+		CharacterConnections,
+
+		character.DescendantRemoving:Connect(
+			onDescendantRemoving
 		)
+	)
 
-	if cameraForwardFlat.Magnitude == 0 then
-		return move
-	end
+	--------------------------------------------------------
+	-- Mantém noclip depois de morrer/respawn
+	--------------------------------------------------------
 
-	local forwardAmount =
-		move:Dot(
-			cameraForwardFlat
-		)
+	if State.Mode ~= "OFF" then
 
-	local rightAmount =
-		move:Dot(
-			cameraRightFlat
-		)
+		task.defer(function()
 
-	------------------------------------------------
-	-- Frente segue inclusive o pitch da câmera.
-	------------------------------------------------
-
-	local cameraForward =
-		Camera.CFrame.LookVector
-
-	local cameraRight =
-		Camera.CFrame.RightVector
-
-	local direction =
-		cameraForward * forwardAmount
-		+
-		cameraRight * rightAmount
-
-	if direction.Magnitude > 1 then
-		direction =
-			direction.Unit
-	end
-
-	return direction
-end
-
---------------------------------------------------
--- GET DESIRED VELOCITY
---------------------------------------------------
-
-local function calculateTargetVelocity()
-
-	if Config.Hover then
-		return Vector3.zero
-	end
-
-	local movement =
-		getMovement()
-
-	local speed =
-		Config.Speed
-
-	if Config.Boost then
-
-		speed *=
-			Config.BoostMultiplier
-	end
-
-	local horizontal =
-		movement * speed
-
-	------------------------------------------------
-	-- VERTICAL BUTTONS
-	------------------------------------------------
-
-	local verticalInput = 0
-
-	if UpHeld then
-		verticalInput += 1
-	end
-
-	if DownHeld then
-		verticalInput -= 1
-	end
-
-	local vertical =
-		Vector3.new(
-			0,
-			verticalInput
-				* Config.VerticalSpeed,
-			0
-		)
-
-	return horizontal + vertical
-end
-
---------------------------------------------------
--- FACE DIRECTION
---------------------------------------------------
-
-local LastLookDirection =
-	Vector3.new(0, 0, -1)
-
-local function updateOrientation()
-
-	if not AlignOrientation
-		or not Root
-	then
-		return
-	end
-
-	if not Config.FaceDirection then
-
-		AlignOrientation.Enabled =
-			false
-
-		return
-	end
-
-	AlignOrientation.Enabled =
-		true
-
-	local desiredDirection
-
-	------------------------------------------------
-	-- CAMERA
-	------------------------------------------------
-
-	if Camera then
-
-		local look =
-			Camera.CFrame.LookVector
-
-		desiredDirection =
-			flatVector(look)
-
-	end
-
-	------------------------------------------------
-	-- FALLBACK
-	------------------------------------------------
-
-	if not desiredDirection
-		or desiredDirection.Magnitude
-		< 0.1
-	then
-
-		desiredDirection =
-			LastLookDirection
-	end
-
-	if desiredDirection.Magnitude > 0.1 then
-
-		LastLookDirection =
-			desiredDirection
-	end
-
-	------------------------------------------------
-	-- SEMPRE UPRIGHT
-	------------------------------------------------
-
-	AlignOrientation.CFrame =
-		CFrame.lookAt(
-			Vector3.zero,
-			LastLookDirection,
-			Vector3.yAxis
-		)
-end
-
---------------------------------------------------
--- PHYSICS LOOP
---------------------------------------------------
-
-local function startPhysicsLoop()
-
-	if PhysicsConnection then
-		PhysicsConnection:Disconnect()
-	end
-
-	PhysicsConnection =
-		RunService.PreSimulation:Connect(
-			function(dt)
-
-				if not Config.Flying then
-					return
-				end
-
-				if not Character
-					or not Character.Parent
-					or not Humanoid
-					or not Root
-					or not LinearVelocity
-				then
-					return
-				end
-
-				if Humanoid.Health <= 0 then
-					return
-				end
-
-				------------------------------------------------
-				-- NÃO DEIXA PLATFORMSTAND APARECER
-				------------------------------------------------
-
-				if Humanoid.PlatformStand then
-					Humanoid.PlatformStand = false
-				end
-
-				Humanoid.Jump = false
-
-				------------------------------------------------
-				-- ANTI SPIN
-				------------------------------------------------
-
-				Root.AssemblyAngularVelocity =
-					Vector3.zero
-
-				------------------------------------------------
-				-- TARGET
-				------------------------------------------------
-
-				local target =
-					calculateTargetVelocity()
-
-				local moving =
-					target.Magnitude
-					> Config.Deadzone
-
-				local rate
-
-				if moving then
-					rate =
-						Config.Acceleration
-				else
-					rate =
-						Config.Braking
-				end
-
-				local alpha =
-					expAlpha(
-						rate,
-						dt
-					)
-
-				CurrentVelocity =
-					CurrentVelocity:Lerp(
-						target,
-						alpha
-					)
-
-				------------------------------------------------
-				-- PERFECT HOVER
-				------------------------------------------------
-
-				if not moving
-					and CurrentVelocity.Magnitude
-					< 0.15
-				then
-
-					CurrentVelocity =
-						Vector3.zero
-				end
-
-				if Config.Hover then
-
-					CurrentVelocity =
-						Vector3.zero
-				end
-
-				------------------------------------------------
-				-- VELOCITY
-				------------------------------------------------
-
-				LinearVelocity.VectorVelocity =
-					CurrentVelocity
-
-				updateOrientation()
+			if State.Character == character then
+				trackCharacter()
 			end
-		)
-end
-
---------------------------------------------------
--- NOCLIP LOOP
---------------------------------------------------
-
-local function startNoClipLoop()
-
-	if NoClipConnection then
-		NoClipConnection:Disconnect()
+		end)
 	end
 
-	NoClipConnection =
-		RunService.PreSimulation:Connect(
-			function()
-
-				if Config.Flying
-					and Config.NoClip
-				then
-
-					applyNoClip()
-				end
-			end
-		)
+	if updateUI then
+		updateUI()
+	end
 end
 
---------------------------------------------------
+------------------------------------------------------------
 -- ENABLE
---------------------------------------------------
+------------------------------------------------------------
 
-local function enableFly()
+enableNoclip = function()
 
-	if not Character
-		or not Humanoid
-		or not Root
-	then
+	if State.Mode == "ON" then
 		return
 	end
 
-	if Humanoid.Health <= 0 then
-		return
+	State.Mode = "ON"
+	State.ExitAccumulator = 0
+
+	trackCharacter()
+
+	if updateUI then
+		updateUI()
 	end
-
-	createFlyPhysics()
-	prepareHumanoid()
-
-	Config.Flying =
-		true
-
-	Config.Hover =
-		false
-
-	UpHeld = false
-	DownHeld = false
-
-	CurrentVelocity =
-		Vector3.zero
-
-	Root.AssemblyLinearVelocity =
-		Vector3.zero
-
-	Root.AssemblyAngularVelocity =
-		Vector3.zero
-
-	LinearVelocity.VectorVelocity =
-		Vector3.zero
-
-	LinearVelocity.Enabled =
-		true
-
-	AlignOrientation.Enabled =
-		Config.FaceDirection
-
-	startPhysicsLoop()
-	startNoClipLoop()
 end
 
---------------------------------------------------
+------------------------------------------------------------
+-- FINISH DISABLE
+------------------------------------------------------------
+
+local function finishDisable()
+
+	restoreAllParts()
+
+	State.Mode = "OFF"
+	State.ExitAccumulator = 0
+
+	if updateUI then
+		updateUI()
+	end
+end
+
+------------------------------------------------------------
 -- DISABLE
---------------------------------------------------
+------------------------------------------------------------
 
-local function disableFly()
+disableNoclip = function()
 
-	Config.Flying =
-		false
-
-	Config.Hover =
-		false
-
-	UpHeld = false
-	DownHeld = false
-
-	CurrentVelocity =
-		Vector3.zero
-
-	if PhysicsConnection then
-
-		PhysicsConnection:Disconnect()
-		PhysicsConnection = nil
+	if State.Mode == "OFF" then
+		return
 	end
 
-	if NoClipConnection then
+	if not CONFIG.SafeExit then
 
-		NoClipConnection:Disconnect()
-		NoClipConnection = nil
+		finishDisable()
+		return
 	end
 
-	if LinearVelocity then
+	--------------------------------------------------------
+	-- Se ainda estiver dentro de parede:
+	-- continua sem colisão até sair.
+	--------------------------------------------------------
 
-		LinearVelocity.VectorVelocity =
-			Vector3.zero
+	if characterInsideSolid() then
 
-		LinearVelocity.Enabled =
-			false
+		State.Mode = "EXITING"
+		State.ExitAccumulator = 0
+
+	else
+
+		finishDisable()
 	end
 
-	if AlignOrientation then
-
-		AlignOrientation.Enabled =
-			false
-	end
-
-	if Root then
-
-		Root.AssemblyLinearVelocity =
-			Vector3.zero
-
-		Root.AssemblyAngularVelocity =
-			Vector3.zero
-	end
-
-	restoreCollision()
-	restoreHumanoid()
-end
-
---------------------------------------------------
--- HARD BRAKE
---------------------------------------------------
-
-local function hardBrake()
-
-	CurrentVelocity =
-		Vector3.zero
-
-	if LinearVelocity then
-
-		LinearVelocity.VectorVelocity =
-			Vector3.zero
-	end
-
-	if Root then
-
-		Root.AssemblyLinearVelocity =
-			Vector3.zero
-
-		Root.AssemblyAngularVelocity =
-			Vector3.zero
+	if updateUI then
+		updateUI()
 	end
 end
 
---------------------------------------------------
--- RESPAWN
---------------------------------------------------
+------------------------------------------------------------
+-- TOGGLE
+------------------------------------------------------------
 
-Player.CharacterAdded:Connect(
-	function(character)
+toggleNoclip = function()
 
-		local resume =
-			Config.Flying
+	if State.Mode == "OFF" then
 
-		if PhysicsConnection then
-			PhysicsConnection:Disconnect()
-			PhysicsConnection = nil
-		end
+		enableNoclip()
 
-		if NoClipConnection then
-			NoClipConnection:Disconnect()
-			NoClipConnection = nil
-		end
+	else
 
-		setCharacter(character)
+		disableNoclip()
+	end
+end
 
-		task.wait(0.5)
+------------------------------------------------------------
+-- PRE-SIMULATION ENGINE
+------------------------------------------------------------
 
-		if resume then
-			enableFly()
+RunService.PreSimulation:Connect(function(deltaTime)
+
+	if State.Mode == "OFF" then
+		return
+	end
+
+	--------------------------------------------------------
+	-- FALLBACK ENFORCEMENT
+	--------------------------------------------------------
+
+	if CONFIG.PreSimulationEnforcement then
+		enforceCharacter()
+	end
+
+	--------------------------------------------------------
+	-- SAFE EXIT
+	--------------------------------------------------------
+
+	if State.Mode == "EXITING" then
+
+		State.ExitAccumulator += deltaTime
+
+		if State.ExitAccumulator
+			>= CONFIG.SafeCheckInterval
+		then
+
+			State.ExitAccumulator = 0
+
+			if not characterInsideSolid() then
+
+				finishDisable()
+			end
 		end
 	end
+end)
+
+------------------------------------------------------------
+-- CHARACTER RESPAWN
+------------------------------------------------------------
+
+Player.CharacterAdded:Connect(function(character)
+
+	bindCharacter(character)
+end)
+
+Player.CharacterRemoving:Connect(function(character)
+
+	if State.Character == character then
+
+		disconnectCharacterConnections()
+
+		State.Character = nil
+
+		----------------------------------------------------
+		-- As antigas partes serão destruídas.
+		-- Limpamos os watchers sem desligar o modo geral,
+		-- permitindo noclip persistir no próximo respawn.
+		----------------------------------------------------
+
+		for part, connection in pairs(PartConnections) do
+
+			if connection then
+				connection:Disconnect()
+			end
+
+			PartConnections[part] = nil
+		end
+
+		table.clear(OriginalState)
+
+		State.TrackedCount = 0
+
+		if updateUI then
+			updateUI()
+		end
+	end
+end)
+
+------------------------------------------------------------
+-- INITIAL CHARACTER
+------------------------------------------------------------
+
+if Player.Character then
+
+	bindCharacter(Player.Character)
+end
+
+------------------------------------------------------------
+-- DESTROY OLD GUI
+------------------------------------------------------------
+
+local oldGui =
+	PlayerGui:FindFirstChild("UltraNoclipGUI")
+
+if oldGui then
+	oldGui:Destroy()
+end
+
+------------------------------------------------------------
+-- GUI
+------------------------------------------------------------
+
+local ScreenGui = Instance.new("ScreenGui")
+
+ScreenGui.Name = "UltraNoclipGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+------------------------------------------------------------
+-- MAIN FRAME
+------------------------------------------------------------
+
+local Main = Instance.new("Frame")
+
+Main.Name = "Main"
+
+Main.Size = UDim2.fromOffset(
+	260,
+	150
 )
 
---------------------------------------------------
--- GUI CLEANUP
---------------------------------------------------
-
-local old =
-	PlayerGui:FindFirstChild(
-		"UltraMobileFly"
-	)
-
-if old then
-	old:Destroy()
-end
-
---------------------------------------------------
--- GUI
---------------------------------------------------
-
-local GUI =
-	Instance.new("ScreenGui")
-
-GUI.Name =
-	"UltraMobileFly"
-
-GUI.ResetOnSpawn =
-	false
-
-GUI.IgnoreGuiInset =
-	false
-
-GUI.Parent =
-	PlayerGui
-
---------------------------------------------------
--- MAIN
---------------------------------------------------
-
-local Main =
-	Instance.new("Frame")
-
-Main.Size =
-	UDim2.fromOffset(
-		320,
-		430
-	)
-
-Main.Position =
-	UDim2.new(
-		1,
-		-335,
-		0.5,
-		-215
-	)
+Main.Position = UDim2.new(
+	0.5,
+	-130,
+	0.5,
+	-75
+)
 
 Main.BackgroundColor3 =
 	Color3.fromRGB(
-		15,
-		16,
-		22
+		18,
+		18,
+		24
 	)
 
-Main.BorderSizePixel =
-	0
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
 
-Main.Parent =
-	GUI
+------------------------------------------------------------
+-- MAIN CORNER
+------------------------------------------------------------
 
-local Corner =
-	Instance.new("UICorner")
+local MainCorner = Instance.new("UICorner")
 
-Corner.CornerRadius =
-	UDim.new(0, 16)
+MainCorner.CornerRadius =
+	UDim.new(
+		0,
+		12
+	)
 
-Corner.Parent =
-	Main
+MainCorner.Parent = Main
 
-local Stroke =
-	Instance.new("UIStroke")
+------------------------------------------------------------
+-- STROKE
+------------------------------------------------------------
+
+local Stroke = Instance.new("UIStroke")
 
 Stroke.Color =
 	Color3.fromRGB(
-		61,
-		64,
-		82
+		72,
+		72,
+		92
 	)
 
-Stroke.Thickness =
-	1
+Stroke.Thickness = 1
+Stroke.Transparency = 0.15
+Stroke.Parent = Main
 
-Stroke.Parent =
-	Main
+------------------------------------------------------------
+-- TITLE
+------------------------------------------------------------
 
---------------------------------------------------
--- HEADER
---------------------------------------------------
-
-local Header =
-	Instance.new("Frame")
-
-Header.Size =
-	UDim2.new(
-		1,
-		0,
-		0,
-		48
-	)
-
-Header.BackgroundTransparency =
-	1
-
-Header.Active =
-	true
-
-Header.Parent =
-	Main
-
-local Title =
-	Instance.new("TextLabel")
+local Title = Instance.new("TextLabel")
 
 Title.Size =
 	UDim2.new(
 		1,
-		-60,
-		1,
-		0
+		-20,
+		0,
+		28
 	)
 
 Title.Position =
 	UDim2.fromOffset(
-		15,
-		0
+		10,
+		8
 	)
 
-Title.BackgroundTransparency =
-	1
+Title.BackgroundTransparency = 1
 
 Title.Text =
-	"MOBILE FLY V4"
-
-Title.Font =
-	Enum.Font.GothamBold
-
-Title.TextSize =
-	17
+	"ULTRA NOCLIP"
 
 Title.TextColor3 =
 	Color3.fromRGB(
@@ -1078,671 +895,437 @@ Title.TextColor3 =
 		250
 	)
 
-Title.TextXAlignment =
-	Enum.TextXAlignment.Left
+Title.TextSize = 16
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Main
 
-Title.Parent =
-	Header
+------------------------------------------------------------
+-- STATUS
+------------------------------------------------------------
 
---------------------------------------------------
--- BUTTON FUNCTION
---------------------------------------------------
+local Status = Instance.new("TextLabel")
 
-local function createButton(
-	text,
-	x,
-	y,
-	w,
-	h
-)
-
-	local button =
-		Instance.new("TextButton")
-
-	button.Position =
-		UDim2.new(
-			0,
-			x,
-			0,
-			y
-		)
-
-	button.Size =
-		UDim2.new(
-			0,
-			w,
-			0,
-			h
-		)
-
-	button.BackgroundColor3 =
-		Color3.fromRGB(
-			35,
-			37,
-			49
-		)
-
-	button.BorderSizePixel =
-		0
-
-	button.Text =
-		text
-
-	button.TextColor3 =
-		Color3.fromRGB(
-			245,
-			245,
-			250
-		)
-
-	button.TextSize =
-		14
-
-	button.Font =
-		Enum.Font.GothamMedium
-
-	button.AutoButtonColor =
-		true
-
-	button.Parent =
-		Main
-
-	local corner =
-		Instance.new("UICorner")
-
-	corner.CornerRadius =
-		UDim.new(0, 10)
-
-	corner.Parent =
-		button
-
-	return button
-end
-
---------------------------------------------------
--- MINIMIZE
---------------------------------------------------
-
-local Minimize =
-	createButton(
-		"—",
-		274,
-		8,
-		36,
-		32
+Status.Size =
+	UDim2.new(
+		1,
+		-20,
+		0,
+		20
 	)
 
---------------------------------------------------
--- FLY
---------------------------------------------------
-
-local FlyButton =
-	createButton(
-		"FLY: OFF",
-		12,
-		53,
-		296,
-		44
+Status.Position =
+	UDim2.fromOffset(
+		10,
+		36
 	)
 
-local function updateFlyButton()
+Status.BackgroundTransparency = 1
 
-	if Config.Flying then
+Status.Text =
+	"STATUS: OFF"
 
-		FlyButton.Text =
-			"FLY: ON"
+Status.TextColor3 =
+	Color3.fromRGB(
+		150,
+		150,
+		165
+	)
 
-		FlyButton.BackgroundColor3 =
+Status.TextSize = 12
+Status.Font = Enum.Font.GothamMedium
+Status.TextXAlignment = Enum.TextXAlignment.Left
+Status.Parent = Main
+
+------------------------------------------------------------
+-- BUTTON
+------------------------------------------------------------
+
+local ToggleButton = Instance.new("TextButton")
+
+ToggleButton.Size =
+	UDim2.new(
+		1,
+		-20,
+		0,
+		42
+	)
+
+ToggleButton.Position =
+	UDim2.fromOffset(
+		10,
+		62
+	)
+
+ToggleButton.BackgroundColor3 =
+	Color3.fromRGB(
+		67,
+		67,
+		82
+	)
+
+ToggleButton.BorderSizePixel = 0
+
+ToggleButton.Text =
+	"ENABLE"
+
+ToggleButton.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+ToggleButton.TextSize = 14
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.AutoButtonColor = false
+ToggleButton.Parent = Main
+
+local ButtonCorner = Instance.new("UICorner")
+
+ButtonCorner.CornerRadius =
+	UDim.new(
+		0,
+		8
+	)
+
+ButtonCorner.Parent = ToggleButton
+
+------------------------------------------------------------
+-- INFO
+------------------------------------------------------------
+
+local Info = Instance.new("TextLabel")
+
+Info.Size =
+	UDim2.new(
+		1,
+		-20,
+		0,
+		30
+	)
+
+Info.Position =
+	UDim2.fromOffset(
+		10,
+		112
+	)
+
+Info.BackgroundTransparency = 1
+
+Info.Text =
+	"N • Toggle   |   RightShift • GUI"
+
+Info.TextColor3 =
+	Color3.fromRGB(
+		115,
+		115,
+		130
+	)
+
+Info.TextSize = 10
+Info.Font = Enum.Font.Gotham
+Info.TextXAlignment = Enum.TextXAlignment.Center
+Info.Parent = Main
+
+------------------------------------------------------------
+-- UI UPDATE
+------------------------------------------------------------
+
+updateUI = function()
+
+	if not Status
+		or not ToggleButton
+	then
+		return
+	end
+
+	if State.Mode == "ON" then
+
+		Status.Text =
+			"STATUS: ON  •  PARTS: "
+			.. tostring(State.TrackedCount)
+
+		Status.TextColor3 =
 			Color3.fromRGB(
-				35,
-				150,
-				85
+				110,
+				255,
+				155
+			)
+
+		ToggleButton.Text =
+			"DISABLE NOCLIP"
+
+		ToggleButton.BackgroundColor3 =
+			Color3.fromRGB(
+				115,
+				72,
+				235
+			)
+
+	elseif State.Mode == "EXITING" then
+
+		Status.Text =
+			"SAIA DA PAREDE PARA DESLIGAR"
+
+		Status.TextColor3 =
+			Color3.fromRGB(
+				255,
+				195,
+				90
+			)
+
+		ToggleButton.Text =
+			"CANCEL SAFE EXIT"
+
+		ToggleButton.BackgroundColor3 =
+			Color3.fromRGB(
+				200,
+				125,
+				50
 			)
 
 	else
 
-		FlyButton.Text =
-			"FLY: OFF"
+		Status.Text =
+			"STATUS: OFF"
 
-		FlyButton.BackgroundColor3 =
+		Status.TextColor3 =
 			Color3.fromRGB(
-				35,
-				37,
-				49
+				150,
+				150,
+				165
+			)
+
+		ToggleButton.Text =
+			"ENABLE NOCLIP"
+
+		ToggleButton.BackgroundColor3 =
+			Color3.fromRGB(
+				67,
+				67,
+				82
 			)
 	end
 end
 
-FlyButton.Activated:Connect(
-	function()
+updateUI()
 
-		if Config.Flying then
-			disableFly()
-		else
-			enableFly()
+------------------------------------------------------------
+-- BUTTON CLICK
+------------------------------------------------------------
+
+ToggleButton.MouseButton1Click:Connect(function()
+
+	if State.Mode == "EXITING" then
+
+		-- Clicar novamente cancela a tentativa
+		-- de desligar e volta para ON.
+
+		State.Mode = "ON"
+		State.ExitAccumulator = 0
+
+		updateUI()
+
+		return
+	end
+
+	toggleNoclip()
+end)
+
+------------------------------------------------------------
+-- BUTTON ANIMATION
+------------------------------------------------------------
+
+ToggleButton.MouseEnter:Connect(function()
+
+	TweenService:Create(
+
+		ToggleButton,
+
+		TweenInfo.new(
+			0.12
+		),
+
+		{
+			BackgroundTransparency = 0.12
+		}
+
+	):Play()
+end)
+
+ToggleButton.MouseLeave:Connect(function()
+
+	TweenService:Create(
+
+		ToggleButton,
+
+		TweenInfo.new(
+			0.12
+		),
+
+		{
+			BackgroundTransparency = 0
+		}
+
+	):Play()
+end)
+
+------------------------------------------------------------
+-- KEYBINDS
+------------------------------------------------------------
+
+UserInputService.InputBegan:Connect(
+	function(input, gameProcessed)
+
+		if gameProcessed then
+			return
 		end
 
-		updateFlyButton()
-	end
-)
+		-- Não ativa tecla enquanto o player
+		-- estiver escrevendo em TextBox.
 
---------------------------------------------------
--- NOCLIP
---------------------------------------------------
-
-local NoClip =
-	createButton(
-		"NOCLIP: OFF",
-		12,
-		106,
-		143,
-		40
-	)
-
-NoClip.Activated:Connect(
-	function()
-
-		Config.NoClip =
-			not Config.NoClip
-
-		NoClip.Text =
-			Config.NoClip
-			and "NOCLIP: ON"
-			or "NOCLIP: OFF"
-
-		if not Config.NoClip then
-			restoreCollision()
-		end
-	end
-)
-
---------------------------------------------------
--- BOOST
---------------------------------------------------
-
-local Boost =
-	createButton(
-		"BOOST: OFF",
-		165,
-		106,
-		143,
-		40
-	)
-
-Boost.Activated:Connect(
-	function()
-
-		Config.Boost =
-			not Config.Boost
-
-		Boost.Text =
-			Config.Boost
-			and "BOOST: ON"
-			or "BOOST: OFF"
-	end
-)
-
---------------------------------------------------
--- CAMERA 3D
---------------------------------------------------
-
-local Camera3D =
-	createButton(
-		"CAMERA 3D: OFF",
-		12,
-		155,
-		143,
-		40
-	)
-
-Camera3D.Activated:Connect(
-	function()
-
-		Config.Camera3D =
-			not Config.Camera3D
-
-		Camera3D.Text =
-			Config.Camera3D
-			and "CAMERA 3D: ON"
-			or "CAMERA 3D: OFF"
-	end
-)
-
---------------------------------------------------
--- HOVER
---------------------------------------------------
-
-local Hover =
-	createButton(
-		"HOVER: OFF",
-		165,
-		155,
-		143,
-		40
-	)
-
-Hover.Activated:Connect(
-	function()
-
-		Config.Hover =
-			not Config.Hover
-
-		if Config.Hover then
-			hardBrake()
+		if UserInputService:GetFocusedTextBox() then
+			return
 		end
 
-		Hover.Text =
-			Config.Hover
-			and "HOVER: ON"
-			or "HOVER: OFF"
-	end
-)
+		if input.KeyCode == CONFIG.ToggleKey then
 
---------------------------------------------------
--- SPEED
---------------------------------------------------
+			if State.Mode == "EXITING" then
 
-local SpeedMinus =
-	createButton(
-		"−",
-		12,
-		204,
-		48,
-		40
-	)
+				State.Mode = "ON"
+				State.ExitAccumulator = 0
 
-local SpeedText =
-	createButton(
-		"SPEED: "
-			.. Config.Speed,
-		68,
-		204,
-		184,
-		40
-	)
+				updateUI()
 
-local SpeedPlus =
-	createButton(
-		"+",
-		260,
-		204,
-		48,
-		40
-	)
+			else
 
-local function updateSpeed()
-
-	SpeedText.Text =
-		"SPEED: "
-		.. Config.Speed
-end
-
-SpeedMinus.Activated:Connect(
-	function()
-
-		Config.Speed =
-			math.clamp(
-				Config.Speed
-					- Config.SpeedStep,
-				Config.MinSpeed,
-				Config.MaxSpeed
-			)
-
-		updateSpeed()
-	end
-)
-
-SpeedPlus.Activated:Connect(
-	function()
-
-		Config.Speed =
-			math.clamp(
-				Config.Speed
-					+ Config.SpeedStep,
-				Config.MinSpeed,
-				Config.MaxSpeed
-			)
-
-		updateSpeed()
-	end
-)
-
---------------------------------------------------
--- VERTICAL SPEED
---------------------------------------------------
-
-local VMinus =
-	createButton(
-		"−",
-		12,
-		253,
-		48,
-		40
-	)
-
-local VText =
-	createButton(
-		"VERTICAL: "
-			.. Config.VerticalSpeed,
-		68,
-		253,
-		184,
-		40
-	)
-
-local VPlus =
-	createButton(
-		"+",
-		260,
-		253,
-		48,
-		40
-	)
-
-local function updateVertical()
-
-	VText.Text =
-		"VERTICAL: "
-		.. Config.VerticalSpeed
-end
-
-VMinus.Activated:Connect(
-	function()
-
-		Config.VerticalSpeed =
-			math.clamp(
-				Config.VerticalSpeed
-					- Config.VerticalStep,
-				Config.MinVertical,
-				Config.MaxVertical
-			)
-
-		updateVertical()
-	end
-)
-
-VPlus.Activated:Connect(
-	function()
-
-		Config.VerticalSpeed =
-			math.clamp(
-				Config.VerticalSpeed
-					+ Config.VerticalStep,
-				Config.MinVertical,
-				Config.MaxVertical
-			)
-
-		updateVertical()
-	end
-)
-
---------------------------------------------------
--- UP/DOWN
---------------------------------------------------
-
-local Up =
-	createButton(
-		"▲ SUBIR",
-		12,
-		302,
-		143,
-		54
-	)
-
-local Down =
-	createButton(
-		"▼ DESCER",
-		165,
-		302,
-		143,
-		54
-	)
-
---------------------------------------------------
--- HOLD SYSTEM
---------------------------------------------------
-
-local function bindHold(
-	button,
-	callback
-)
-
-	local active = {}
-
-	button.InputBegan:Connect(
-		function(input)
-
-			if input.UserInputType
-				== Enum.UserInputType.Touch
-				or
-				input.UserInputType
-				== Enum.UserInputType.MouseButton1
-			then
-
-				active[input] = true
-
-				callback(true)
+				toggleNoclip()
 			end
-		end
-	)
 
-	button.InputEnded:Connect(
-		function(input)
+		elseif input.KeyCode == CONFIG.GuiKey then
 
-			if active[input] then
+			State.GuiVisible =
+				not State.GuiVisible
 
-				active[input] = nil
-
-				callback(false)
-			end
-		end
-	)
-end
-
-bindHold(
-	Up,
-	function(value)
-
-		UpHeld = value
-
-		if value then
-			Config.Hover = false
-			Hover.Text =
-				"HOVER: OFF"
+			Main.Visible =
+				State.GuiVisible
 		end
 	end
 )
 
-bindHold(
-	Down,
-	function(value)
+------------------------------------------------------------
+-- DRAGGING SYSTEM
+------------------------------------------------------------
 
-		DownHeld = value
+local dragging = false
+local dragInput = nil
+local dragStart = nil
+local startPosition = nil
 
-		if value then
-			Config.Hover = false
-			Hover.Text =
-				"HOVER: OFF"
-		end
-	end
-)
+Main.InputBegan:Connect(function(input)
 
---------------------------------------------------
--- BRAKE
---------------------------------------------------
-
-local Brake =
-	createButton(
-		"PARAR IMEDIATAMENTE",
-		12,
-		365,
-		296,
-		42
-	)
-
-Brake.Activated:Connect(
-	function()
-
-		Config.Hover = true
-
-		Hover.Text =
-			"HOVER: ON"
-
-		hardBrake()
-	end
-)
-
---------------------------------------------------
--- MINIMIZE
---------------------------------------------------
-
-local Minimized = false
-
-local OriginalSize =
-	Main.Size
-
-Minimize.Activated:Connect(
-	function()
-
-		Minimized =
-			not Minimized
-
-		for _, object in ipairs(
-			Main:GetChildren()
-		) do
-
-			if object:IsA("GuiObject")
-				and object ~= Header
-				and object ~= Minimize
-			then
-
-				object.Visible =
-					not Minimized
-			end
-		end
-
-		if Minimized then
-
-			Main.Size =
-				UDim2.fromOffset(
-					320,
-					48
-				)
-
-			Minimize.Text = "+"
-
-		else
-
-			Main.Size =
-				OriginalSize
-
-			Minimize.Text = "—"
-		end
-	end
-)
-
---------------------------------------------------
--- DRAG MOBILE
---------------------------------------------------
-
-local Dragging = false
-local DragInput
-local DragStart
-local StartPosition
-
-Header.InputBegan:Connect(
-	function(input)
-
-		if input.UserInputType
-			== Enum.UserInputType.Touch
-			or
-			input.UserInputType
+	if input.UserInputType
 			== Enum.UserInputType.MouseButton1
-		then
 
-			Dragging = true
-
-			DragStart =
-				input.Position
-
-			StartPosition =
-				Main.Position
-
-			input.Changed:Connect(
-				function()
-
-					if input.UserInputState
-						== Enum.UserInputState.End
-					then
-
-						Dragging =
-							false
-					end
-				end
-			)
-		end
-	end
-)
-
-Header.InputChanged:Connect(
-	function(input)
-
-		if input.UserInputType
+		or input.UserInputType
 			== Enum.UserInputType.Touch
-			or
-			input.UserInputType
-			== Enum.UserInputType.MouseMovement
-		then
+	then
 
-			DragInput =
-				input
-		end
-	end
-)
+		dragging = true
 
-UIS.InputChanged:Connect(
-	function(input)
+		dragStart =
+			input.Position
 
-		if Dragging
-			and input == DragInput
-		then
+		startPosition =
+			Main.Position
 
-			local delta =
-				input.Position
-				- DragStart
+		input.Changed:Connect(function()
 
-			Main.Position =
-				UDim2.new(
-					StartPosition.X.Scale,
-					StartPosition.X.Offset
-						+ delta.X,
+			if input.UserInputState
+				== Enum.UserInputState.End
+			then
 
-					StartPosition.Y.Scale,
-					StartPosition.Y.Offset
-						+ delta.Y
-				)
-		end
-	end
-)
-
---------------------------------------------------
--- SAFETY: TOUCH RELEASE
---------------------------------------------------
-
-UIS.InputEnded:Connect(
-	function(input)
-
-		if input.UserInputType
-			== Enum.UserInputType.Touch
-		then
-
-			-- Evita ficar subindo eternamente
-			-- se o Roblox perder o evento do botão.
-
-			if not UIS.TouchEnabled then
-				UpHeld = false
-				DownHeld = false
+				dragging = false
 			end
-		end
+		end)
 	end
+end)
+
+Main.InputChanged:Connect(function(input)
+
+	if input.UserInputType
+		== Enum.UserInputType.MouseMovement
+
+		or input.UserInputType
+		== Enum.UserInputType.Touch
+	then
+
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+
+	if input ~= dragInput then
+		return
+	end
+
+	if not dragging then
+		return
+	end
+
+	local delta =
+		input.Position
+		- dragStart
+
+	Main.Position =
+		UDim2.new(
+
+			startPosition.X.Scale,
+
+			startPosition.X.Offset
+				+ delta.X,
+
+			startPosition.Y.Scale,
+
+			startPosition.Y.Offset
+				+ delta.Y
+		)
+end)
+
+------------------------------------------------------------
+-- SCRIPT CLEANUP
+------------------------------------------------------------
+
+script.Destroying:Connect(function()
+
+	--------------------------------------------------------
+	-- Restaura tudo antes do script desaparecer
+	--------------------------------------------------------
+
+	restoreAllParts()
+
+	disconnectCharacterConnections()
+
+	for part, connection in pairs(PartConnections) do
+
+		if connection then
+			connection:Disconnect()
+		end
+
+		PartConnections[part] = nil
+	end
+
+	if ScreenGui then
+		ScreenGui:Destroy()
+	end
+end)
+
+------------------------------------------------------------
+-- READY
+------------------------------------------------------------
+
+print(
+	"[ULTRA NOCLIP] Loaded successfully."
 )
