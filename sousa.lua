@@ -1,1331 +1,1511 @@
---[[
-    ============================================================
-                    ULTRA NOCLIP - LOCAL V1
-    ============================================================
-
-    Feito para uso no SEU próprio jogo no Roblox Studio.
-
-    LOCAL:
-    StarterPlayer
-        > StarterPlayerScripts
-            > LocalScript
-
-    RECURSOS:
-    - 100% LocalScript
-    - GUI simples
-    - PC + Mobile
-    - Tecla N liga/desliga
-    - RightShift esconde/mostra GUI
-    - Respawn automático
-    - R6 / R15 / rigs customizados
-    - Detecta novas partes automaticamente
-    - Detecta acessórios e Tools equipadas
-    - Preserva CanCollide original de cada peça
-    - Restaura corretamente quando desligado
-    - PreSimulation enforcement
-    - PropertyChanged enforcement
-    - Safe Exit
-    - Anti-stuck básico
-    - GUI arrastável
-    - Não mexe em CanTouch/CanQuery
-    - Limpeza automática
-
-    ============================================================
-]]
-
-------------------------------------------------------------
--- SERVICES
-------------------------------------------------------------
+--==============================================================
+-- SOUZA AIM + ESP
+-- LocalScript -> StarterPlayer > StarterPlayerScripts
+--==============================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local UIS = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local Workspace = game:GetService("Workspace")
 
-------------------------------------------------------------
--- PLAYER
-------------------------------------------------------------
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local Player = Players.LocalPlayer
-local PlayerGui = Player:WaitForChild("PlayerGui")
-
-------------------------------------------------------------
+--==============================================================
 -- CONFIG
-------------------------------------------------------------
+--==============================================================
 
-local CONFIG = {
+local Settings = {
+	Aimbot = false,
 
-	-- N = ativar/desativar noclip
-	ToggleKey = Enum.KeyCode.N,
+	ESP = false,
+	ESPNames = true,
 
-	-- RightShift = esconder/mostrar interface
-	GuiKey = Enum.KeyCode.RightShift,
+	ShowFOV = true,
 
-	-- Confere se você ainda está dentro de uma parede
-	-- antes de restaurar colisão.
-	SafeExit = true,
+	TeamCheck = false,
+	WallCheck = false,
 
-	-- Intervalo da verificação de saída segura.
-	SafeCheckInterval = 0.10,
+	FOV = 220,
+	Smoothness = 0.22,
 
-	-- Reduz um pouco a caixa usada para detectar se
-	-- o personagem está realmente dentro de uma parede.
-	SafeBoxScale = 0.78,
-
-	-- Quantidade máxima de objetos considerados
-	-- por cada verificação.
-	SafeMaxParts = 100,
-
-	-- Reaplica CanCollide=false antes da física.
-	PreSimulationEnforcement = true,
+	AimPart = "Head"
 }
 
-------------------------------------------------------------
--- STATE
-------------------------------------------------------------
+--==============================================================
+-- CORES
+--==============================================================
 
-local State = {
+local COLORS = {
+	Background = Color3.fromRGB(14, 15, 20),
+	Panel = Color3.fromRGB(20, 22, 29),
+	Card = Color3.fromRGB(29, 32, 41),
 
-	-- OFF
-	-- ON
-	-- EXITING
-	Mode = "OFF",
+	CardHover = Color3.fromRGB(34, 38, 49),
 
-	Character = nil,
+	Text = Color3.fromRGB(245, 245, 250),
+	SubText = Color3.fromRGB(145, 150, 165),
 
-	GuiVisible = true,
+	Accent = Color3.fromRGB(115, 85, 255),
+	Accent2 = Color3.fromRGB(160, 100, 255),
 
-	TrackedCount = 0,
+	Enabled = Color3.fromRGB(70, 210, 125),
+	Disabled = Color3.fromRGB(90, 94, 105),
 
-	ExitAccumulator = 0,
+	ESP = Color3.fromRGB(255, 75, 90)
 }
 
-------------------------------------------------------------
--- TABELAS
-------------------------------------------------------------
-
--- weak tables:
--- se uma Part for destruída, ela pode ser coletada
--- automaticamente pelo garbage collector.
-
-local OriginalState = setmetatable({}, {
-	__mode = "k"
-})
-
-local PartConnections = setmetatable({}, {
-	__mode = "k"
-})
-
-local CharacterConnections = {}
-
-------------------------------------------------------------
--- FORWARD DECLARATIONS
-------------------------------------------------------------
-
-local updateUI
-local enableNoclip
-local disableNoclip
-local toggleNoclip
-local bindCharacter
-
-------------------------------------------------------------
--- CONNECTION UTILS
-------------------------------------------------------------
-
-local function disconnect(connection)
-
-	if connection then
-		connection:Disconnect()
-	end
-end
-
-local function disconnectCharacterConnections()
-
-	for _, connection in ipairs(CharacterConnections) do
-
-		if connection then
-			connection:Disconnect()
-		end
-	end
-
-	table.clear(CharacterConnections)
-end
-
-------------------------------------------------------------
--- CHARACTER VALIDATION
-------------------------------------------------------------
-
-local function isCurrentCharacterPart(part)
-
-	if not State.Character then
-		return false
-	end
-
-	if not part then
-		return false
-	end
-
-	if not part:IsA("BasePart") then
-		return false
-	end
-
-	return part:IsDescendantOf(State.Character)
-end
-
-------------------------------------------------------------
--- COUNT TRACKED PARTS
-------------------------------------------------------------
-
-local function recountParts()
-
-	local count = 0
-
-	for part in pairs(OriginalState) do
-
-		if part and part.Parent then
-			count += 1
-		end
-	end
-
-	State.TrackedCount = count
-end
-
-------------------------------------------------------------
--- STORE ORIGINAL STATE
-------------------------------------------------------------
-
-local function saveOriginalState(part)
-
-	if OriginalState[part] ~= nil then
-		return
-	end
-
-	OriginalState[part] = {
-
-		CanCollide = part.CanCollide,
-	}
-end
-
-------------------------------------------------------------
--- ENFORCE ONE PART
-------------------------------------------------------------
-
-local function enforcePart(part)
-
-	if State.Mode == "OFF" then
-		return
-	end
-
-	if not isCurrentCharacterPart(part) then
-		return
-	end
-
-	if part.CanCollide then
-		part.CanCollide = false
-	end
-end
-
-------------------------------------------------------------
--- WATCH ONE PART
-------------------------------------------------------------
-
-local function trackPart(part)
-
-	if not part:IsA("BasePart") then
-		return
-	end
-
-	if not isCurrentCharacterPart(part) then
-		return
-	end
-
-	saveOriginalState(part)
-
-	--------------------------------------------------------
-	-- PROPERTY WATCHER
-	--------------------------------------------------------
-
-	if not PartConnections[part] then
-
-		PartConnections[part] =
-			part:GetPropertyChangedSignal("CanCollide"):Connect(function()
-
-				if State.Mode == "OFF" then
-					return
-				end
-
-				if not isCurrentCharacterPart(part) then
-					return
-				end
-
-				-- Se outro sistema reativar colisão
-				-- enquanto noclip está ligado,
-				-- desativa novamente.
-
-				if part.CanCollide then
-					part.CanCollide = false
-				end
-			end)
-	end
-
-	enforcePart(part)
-
-	recountParts()
-
-	if updateUI then
-		updateUI()
-	end
-end
-
-------------------------------------------------------------
--- RESTORE ONE PART
-------------------------------------------------------------
-
-local function restorePart(part)
-
-	local original = OriginalState[part]
-
-	if original then
-
-		if part and part.Parent then
-
-			pcall(function()
-
-				part.CanCollide = original.CanCollide
-			end)
-		end
-
-		OriginalState[part] = nil
-	end
-
-	if PartConnections[part] then
-
-		PartConnections[part]:Disconnect()
-		PartConnections[part] = nil
-	end
-end
-
-------------------------------------------------------------
--- RESTORE EVERYTHING
-------------------------------------------------------------
-
-local function restoreAllParts()
-
-	-- Primeiro deixa o modo OFF para impedir que
-	-- PropertyChanged coloque false novamente.
-
-	State.Mode = "OFF"
-
-	local parts = {}
-
-	for part in pairs(OriginalState) do
-		table.insert(parts, part)
-	end
-
-	for _, part in ipairs(parts) do
-		restorePart(part)
-	end
-
-	State.TrackedCount = 0
-end
-
-------------------------------------------------------------
--- TRACK WHOLE CHARACTER
-------------------------------------------------------------
-
-local function trackCharacter()
-
-	local character = State.Character
-
-	if not character then
-		return
-	end
-
-	for _, object in ipairs(character:GetDescendants()) do
-
-		if object:IsA("BasePart") then
-			trackPart(object)
-		end
-	end
-end
-
-------------------------------------------------------------
--- RE-ENFORCE CHARACTER
-------------------------------------------------------------
-
-local function enforceCharacter()
-
-	if State.Mode == "OFF" then
-		return
-	end
-
-	local character = State.Character
-
-	if not character then
-		return
-	end
-
-	for _, object in ipairs(character:GetDescendants()) do
-
-		if object:IsA("BasePart") then
-
-			-- Caso ainda não esteja registrado,
-			-- registra agora.
-
-			if not OriginalState[object] then
-				trackPart(object)
-			else
-				enforcePart(object)
-			end
-		end
-	end
-end
-
-------------------------------------------------------------
--- SAFE EXIT PARAMETERS
-------------------------------------------------------------
-
-local Overlap = OverlapParams.new()
-
-Overlap.FilterType = Enum.RaycastFilterType.Exclude
-Overlap.MaxParts = CONFIG.SafeMaxParts
-Overlap.RespectCanCollide = true
-
-------------------------------------------------------------
--- CHECK IF CHARACTER IS INSIDE SOLID PART
-------------------------------------------------------------
-
-local function characterInsideSolid()
-
-	local character = State.Character
-
-	if not character then
-		return false
-	end
-
-	Overlap.FilterDescendantsInstances = {
-		character
-	}
-
-	for _, object in ipairs(character:GetDescendants()) do
-
-		if object:IsA("BasePart") then
-
-			------------------------------------------------
-			-- Ignora peças absurdamente pequenas
-			------------------------------------------------
-
-			if object.Size.Magnitude > 0.15 then
-
-				local scale = CONFIG.SafeBoxScale
-
-				local size = Vector3.new(
-
-					math.max(
-						object.Size.X * scale,
-						0.05
-					),
-
-					math.max(
-						object.Size.Y * scale,
-						0.05
-					),
-
-					math.max(
-						object.Size.Z * scale,
-						0.05
-					)
-				)
-
-				local success, hits = pcall(function()
-
-					return Workspace:GetPartBoundsInBox(
-						object.CFrame,
-						size,
-						Overlap
-					)
-				end)
-
-				if success then
-
-					for _, hit in ipairs(hits) do
-
-						if hit
-							and hit:IsA("BasePart")
-							and hit.CanCollide
-							and not hit:IsDescendantOf(character)
-						then
-
-							return true
-						end
-					end
-				end
-			end
-		end
-	end
-
-	return false
-end
-
-------------------------------------------------------------
--- CHARACTER DESCENDANT ADDED
-------------------------------------------------------------
-
-local function onDescendantAdded(object)
-
-	if not object:IsA("BasePart") then
-		return
-	end
-
-	if State.Mode ~= "OFF" then
-
-		-- defer ajuda especialmente com acessórios
-		-- sendo montados no character.
-
-		task.defer(function()
-
-			if object.Parent
-				and State.Character
-				and object:IsDescendantOf(State.Character)
-			then
-
-				trackPart(object)
-			end
-		end)
-	end
-end
-
-------------------------------------------------------------
--- CHARACTER DESCENDANT REMOVING
-------------------------------------------------------------
-
-local function onDescendantRemoving(object)
-
-	if not object:IsA("BasePart") then
-		return
-	end
-
-	if not OriginalState[object] then
-		return
-	end
-
-	-- O evento ocorre durante a mudança de parent.
-	-- Esperamos um ciclo para descobrir se realmente
-	-- saiu do personagem.
-
-	task.defer(function()
-
-		if not object.Parent then
-
-			restorePart(object)
-
-		elseif not State.Character
-			or not object:IsDescendantOf(State.Character)
-		then
-
-			restorePart(object)
-		end
-
-		recountParts()
-
-		if updateUI then
-			updateUI()
-		end
-	end)
-end
-
-------------------------------------------------------------
--- BIND CHARACTER
-------------------------------------------------------------
-
-bindCharacter = function(character)
-
-	disconnectCharacterConnections()
-
-	--------------------------------------------------------
-	-- Limpa referências anteriores
-	--------------------------------------------------------
-
-	for part, connection in pairs(PartConnections) do
-
-		if connection then
-			connection:Disconnect()
-		end
-
-		PartConnections[part] = nil
-	end
-
-	table.clear(OriginalState)
-
-	State.Character = character
-	State.TrackedCount = 0
-
-	--------------------------------------------------------
-	-- Descendants dinâmicos
-	--------------------------------------------------------
-
-	table.insert(
-		CharacterConnections,
-
-		character.DescendantAdded:Connect(
-			onDescendantAdded
-		)
-	)
-
-	table.insert(
-		CharacterConnections,
-
-		character.DescendantRemoving:Connect(
-			onDescendantRemoving
-		)
-	)
-
-	--------------------------------------------------------
-	-- Mantém noclip depois de morrer/respawn
-	--------------------------------------------------------
-
-	if State.Mode ~= "OFF" then
-
-		task.defer(function()
-
-			if State.Character == character then
-				trackCharacter()
-			end
-		end)
-	end
-
-	if updateUI then
-		updateUI()
-	end
-end
-
-------------------------------------------------------------
--- ENABLE
-------------------------------------------------------------
-
-enableNoclip = function()
-
-	if State.Mode == "ON" then
-		return
-	end
-
-	State.Mode = "ON"
-	State.ExitAccumulator = 0
-
-	trackCharacter()
-
-	if updateUI then
-		updateUI()
-	end
-end
-
-------------------------------------------------------------
--- FINISH DISABLE
-------------------------------------------------------------
-
-local function finishDisable()
-
-	restoreAllParts()
-
-	State.Mode = "OFF"
-	State.ExitAccumulator = 0
-
-	if updateUI then
-		updateUI()
-	end
-end
-
-------------------------------------------------------------
--- DISABLE
-------------------------------------------------------------
-
-disableNoclip = function()
-
-	if State.Mode == "OFF" then
-		return
-	end
-
-	if not CONFIG.SafeExit then
-
-		finishDisable()
-		return
-	end
-
-	--------------------------------------------------------
-	-- Se ainda estiver dentro de parede:
-	-- continua sem colisão até sair.
-	--------------------------------------------------------
-
-	if characterInsideSolid() then
-
-		State.Mode = "EXITING"
-		State.ExitAccumulator = 0
-
-	else
-
-		finishDisable()
-	end
-
-	if updateUI then
-		updateUI()
-	end
-end
-
-------------------------------------------------------------
--- TOGGLE
-------------------------------------------------------------
-
-toggleNoclip = function()
-
-	if State.Mode == "OFF" then
-
-		enableNoclip()
-
-	else
-
-		disableNoclip()
-	end
-end
-
-------------------------------------------------------------
--- PRE-SIMULATION ENGINE
-------------------------------------------------------------
-
-RunService.PreSimulation:Connect(function(deltaTime)
-
-	if State.Mode == "OFF" then
-		return
-	end
-
-	--------------------------------------------------------
-	-- FALLBACK ENFORCEMENT
-	--------------------------------------------------------
-
-	if CONFIG.PreSimulationEnforcement then
-		enforceCharacter()
-	end
-
-	--------------------------------------------------------
-	-- SAFE EXIT
-	--------------------------------------------------------
-
-	if State.Mode == "EXITING" then
-
-		State.ExitAccumulator += deltaTime
-
-		if State.ExitAccumulator
-			>= CONFIG.SafeCheckInterval
-		then
-
-			State.ExitAccumulator = 0
-
-			if not characterInsideSolid() then
-
-				finishDisable()
-			end
-		end
-	end
-end)
-
-------------------------------------------------------------
--- CHARACTER RESPAWN
-------------------------------------------------------------
-
-Player.CharacterAdded:Connect(function(character)
-
-	bindCharacter(character)
-end)
-
-Player.CharacterRemoving:Connect(function(character)
-
-	if State.Character == character then
-
-		disconnectCharacterConnections()
-
-		State.Character = nil
-
-		----------------------------------------------------
-		-- As antigas partes serão destruídas.
-		-- Limpamos os watchers sem desligar o modo geral,
-		-- permitindo noclip persistir no próximo respawn.
-		----------------------------------------------------
-
-		for part, connection in pairs(PartConnections) do
-
-			if connection then
-				connection:Disconnect()
-			end
-
-			PartConnections[part] = nil
-		end
-
-		table.clear(OriginalState)
-
-		State.TrackedCount = 0
-
-		if updateUI then
-			updateUI()
-		end
-	end
-end)
-
-------------------------------------------------------------
--- INITIAL CHARACTER
-------------------------------------------------------------
-
-if Player.Character then
-
-	bindCharacter(Player.Character)
-end
-
-------------------------------------------------------------
--- DESTROY OLD GUI
-------------------------------------------------------------
-
-local oldGui =
-	PlayerGui:FindFirstChild("UltraNoclipGUI")
-
-if oldGui then
-	oldGui:Destroy()
-end
-
-------------------------------------------------------------
--- GUI
-------------------------------------------------------------
-
-local ScreenGui = Instance.new("ScreenGui")
-
-ScreenGui.Name = "UltraNoclipGUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.IgnoreGuiInset = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = PlayerGui
-
-------------------------------------------------------------
--- MAIN FRAME
-------------------------------------------------------------
+--==============================================================
+-- SCREEN GUI
+--==============================================================
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "SouzaAimESP"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.Parent = PlayerGui
+
+--==============================================================
+-- FOV
+--==============================================================
+
+local FOVCircle = Instance.new("Frame")
+FOVCircle.Name = "FOVCircle"
+FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircle.BackgroundTransparency = 1
+FOVCircle.Size = UDim2.fromOffset(
+	Settings.FOV * 2,
+	Settings.FOV * 2
+)
+FOVCircle.ZIndex = 1
+FOVCircle.Parent = Gui
+
+local FOVCorner = Instance.new("UICorner")
+FOVCorner.CornerRadius = UDim.new(1, 0)
+FOVCorner.Parent = FOVCircle
+
+local FOVStroke = Instance.new("UIStroke")
+FOVStroke.Color = COLORS.Accent
+FOVStroke.Thickness = 1.5
+FOVStroke.Transparency = 0.25
+FOVStroke.Parent = FOVCircle
+
+--==============================================================
+-- MAIN PANEL
+--==============================================================
 
 local Main = Instance.new("Frame")
-
 Main.Name = "Main"
-
-Main.Size = UDim2.fromOffset(
-	260,
-	150
-)
-
+Main.Size = UDim2.fromOffset(330, 475)
 Main.Position = UDim2.new(
 	0.5,
-	-130,
+	-165,
 	0.5,
-	-75
+	-237
 )
 
-Main.BackgroundColor3 =
-	Color3.fromRGB(
-		18,
-		18,
-		24
-	)
-
+Main.BackgroundColor3 = COLORS.Panel
 Main.BorderSizePixel = 0
-Main.Parent = ScreenGui
-
-------------------------------------------------------------
--- MAIN CORNER
-------------------------------------------------------------
+Main.ZIndex = 10
+Main.Parent = Gui
 
 local MainCorner = Instance.new("UICorner")
-
-MainCorner.CornerRadius =
-	UDim.new(
-		0,
-		12
-	)
-
+MainCorner.CornerRadius = UDim.new(0, 18)
 MainCorner.Parent = Main
 
-------------------------------------------------------------
--- STROKE
-------------------------------------------------------------
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(53, 56, 70)
+MainStroke.Thickness = 1
+MainStroke.Transparency = 0.15
+MainStroke.Parent = Main
 
-local Stroke = Instance.new("UIStroke")
+--==============================================================
+-- TOP BAR
+--==============================================================
 
-Stroke.Color =
-	Color3.fromRGB(
-		72,
-		72,
-		92
-	)
+local TopBar = Instance.new("Frame")
+TopBar.Name = "TopBar"
+TopBar.Size = UDim2.new(1, 0, 0, 62)
+TopBar.BackgroundTransparency = 1
+TopBar.Active = true
+TopBar.ZIndex = 11
+TopBar.Parent = Main
 
-Stroke.Thickness = 1
-Stroke.Transparency = 0.15
-Stroke.Parent = Main
+local Logo = Instance.new("Frame")
+Logo.Size = UDim2.fromOffset(38, 38)
+Logo.Position = UDim2.fromOffset(14, 12)
+Logo.BackgroundColor3 = COLORS.Accent
+Logo.BorderSizePixel = 0
+Logo.ZIndex = 12
+Logo.Parent = TopBar
 
-------------------------------------------------------------
--- TITLE
-------------------------------------------------------------
+Instance.new(
+	"UICorner",
+	Logo
+).CornerRadius = UDim.new(0, 11)
+
+local LogoText = Instance.new("TextLabel")
+LogoText.Size = UDim2.fromScale(1, 1)
+LogoText.BackgroundTransparency = 1
+LogoText.Text = "S"
+LogoText.Font = Enum.Font.GothamBold
+LogoText.TextSize = 20
+LogoText.TextColor3 = Color3.new(1, 1, 1)
+LogoText.ZIndex = 13
+LogoText.Parent = Logo
 
 local Title = Instance.new("TextLabel")
-
-Title.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		28
-	)
-
-Title.Position =
-	UDim2.fromOffset(
-		10,
-		8
-	)
-
+Title.Size = UDim2.new(1, -115, 0, 24)
+Title.Position = UDim2.fromOffset(62, 10)
 Title.BackgroundTransparency = 1
 
-Title.Text =
-	"ULTRA NOCLIP"
-
-Title.TextColor3 =
-	Color3.fromRGB(
-		245,
-		245,
-		250
-	)
-
-Title.TextSize = 16
+Title.Text = "SOUZA AIM"
 Title.Font = Enum.Font.GothamBold
+Title.TextSize = 17
+Title.TextColor3 = COLORS.Text
 Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Parent = Main
 
-------------------------------------------------------------
--- STATUS
-------------------------------------------------------------
+Title.ZIndex = 12
+Title.Parent = TopBar
 
-local Status = Instance.new("TextLabel")
+local Subtitle = Instance.new("TextLabel")
+Subtitle.Size = UDim2.new(1, -115, 0, 18)
+Subtitle.Position = UDim2.fromOffset(62, 32)
+Subtitle.BackgroundTransparency = 1
 
-Status.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		20
-	)
+Subtitle.Text = "ESP • AIMBOT"
+Subtitle.Font = Enum.Font.GothamMedium
+Subtitle.TextSize = 11
+Subtitle.TextColor3 = COLORS.SubText
+Subtitle.TextXAlignment = Enum.TextXAlignment.Left
 
-Status.Position =
-	UDim2.fromOffset(
-		10,
-		36
-	)
+Subtitle.ZIndex = 12
+Subtitle.Parent = TopBar
 
-Status.BackgroundTransparency = 1
+--==============================================================
+-- MINIMIZE
+--==============================================================
 
-Status.Text =
-	"STATUS: OFF"
+local Minimize = Instance.new("TextButton")
+Minimize.Size = UDim2.fromOffset(38, 38)
+Minimize.Position = UDim2.new(1, -50, 0, 12)
 
-Status.TextColor3 =
-	Color3.fromRGB(
-		150,
-		150,
-		165
-	)
+Minimize.BackgroundColor3 = COLORS.Card
+Minimize.BorderSizePixel = 0
 
-Status.TextSize = 12
-Status.Font = Enum.Font.GothamMedium
-Status.TextXAlignment = Enum.TextXAlignment.Left
-Status.Parent = Main
+Minimize.Text = "—"
+Minimize.Font = Enum.Font.GothamBold
+Minimize.TextSize = 20
+Minimize.TextColor3 = COLORS.Text
 
-------------------------------------------------------------
--- BUTTON
-------------------------------------------------------------
+Minimize.AutoButtonColor = false
 
-local ToggleButton = Instance.new("TextButton")
+Minimize.ZIndex = 13
+Minimize.Parent = TopBar
 
-ToggleButton.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		42
-	)
+Instance.new(
+	"UICorner",
+	Minimize
+).CornerRadius = UDim.new(0, 11)
 
-ToggleButton.Position =
-	UDim2.fromOffset(
-		10,
-		62
-	)
+--==============================================================
+-- CONTENT
+--==============================================================
 
-ToggleButton.BackgroundColor3 =
-	Color3.fromRGB(
-		67,
-		67,
-		82
-	)
+local Content = Instance.new("ScrollingFrame")
+Content.Name = "Content"
 
-ToggleButton.BorderSizePixel = 0
+Content.Size = UDim2.new(1, -20, 1, -75)
+Content.Position = UDim2.fromOffset(10, 65)
 
-ToggleButton.Text =
-	"ENABLE"
+Content.BackgroundTransparency = 1
+Content.BorderSizePixel = 0
 
-ToggleButton.TextColor3 =
-	Color3.fromRGB(
-		255,
-		255,
-		255
-	)
+Content.ScrollBarThickness = 3
+Content.ScrollBarImageColor3 = COLORS.Accent
 
-ToggleButton.TextSize = 14
-ToggleButton.Font = Enum.Font.GothamBold
-ToggleButton.AutoButtonColor = false
-ToggleButton.Parent = Main
+Content.CanvasSize = UDim2.fromOffset(0, 550)
 
-local ButtonCorner = Instance.new("UICorner")
+Content.ZIndex = 11
+Content.Parent = Main
 
-ButtonCorner.CornerRadius =
-	UDim.new(
-		0,
-		8
-	)
+local Layout = Instance.new("UIListLayout")
+Layout.Padding = UDim.new(0, 8)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Parent = Content
 
-ButtonCorner.Parent = ToggleButton
+--==============================================================
+-- SECTION TITLE
+--==============================================================
 
-------------------------------------------------------------
--- INFO
-------------------------------------------------------------
+local function CreateSection(text)
 
-local Info = Instance.new("TextLabel")
+	local Label = Instance.new("TextLabel")
 
-Info.Size =
-	UDim2.new(
-		1,
-		-20,
-		0,
-		30
-	)
+	Label.Size = UDim2.new(1, -10, 0, 26)
+	Label.BackgroundTransparency = 1
 
-Info.Position =
-	UDim2.fromOffset(
-		10,
-		112
-	)
+	Label.Text = string.upper(text)
 
-Info.BackgroundTransparency = 1
+	Label.Font = Enum.Font.GothamBold
+	Label.TextSize = 11
+	Label.TextColor3 = COLORS.SubText
 
-Info.Text =
-	"N • Toggle   |   RightShift • GUI"
+	Label.TextXAlignment =
+		Enum.TextXAlignment.Left
 
-Info.TextColor3 =
-	Color3.fromRGB(
-		115,
-		115,
-		130
-	)
+	Label.Parent = Content
 
-Info.TextSize = 10
-Info.Font = Enum.Font.Gotham
-Info.TextXAlignment = Enum.TextXAlignment.Center
-Info.Parent = Main
-
-------------------------------------------------------------
--- UI UPDATE
-------------------------------------------------------------
-
-updateUI = function()
-
-	if not Status
-		or not ToggleButton
-	then
-		return
-	end
-
-	if State.Mode == "ON" then
-
-		Status.Text =
-			"STATUS: ON  •  PARTS: "
-			.. tostring(State.TrackedCount)
-
-		Status.TextColor3 =
-			Color3.fromRGB(
-				110,
-				255,
-				155
-			)
-
-		ToggleButton.Text =
-			"DISABLE NOCLIP"
-
-		ToggleButton.BackgroundColor3 =
-			Color3.fromRGB(
-				115,
-				72,
-				235
-			)
-
-	elseif State.Mode == "EXITING" then
-
-		Status.Text =
-			"SAIA DA PAREDE PARA DESLIGAR"
-
-		Status.TextColor3 =
-			Color3.fromRGB(
-				255,
-				195,
-				90
-			)
-
-		ToggleButton.Text =
-			"CANCEL SAFE EXIT"
-
-		ToggleButton.BackgroundColor3 =
-			Color3.fromRGB(
-				200,
-				125,
-				50
-			)
-
-	else
-
-		Status.Text =
-			"STATUS: OFF"
-
-		Status.TextColor3 =
-			Color3.fromRGB(
-				150,
-				150,
-				165
-			)
-
-		ToggleButton.Text =
-			"ENABLE NOCLIP"
-
-		ToggleButton.BackgroundColor3 =
-			Color3.fromRGB(
-				67,
-				67,
-				82
-			)
-	end
+	return Label
 end
 
-updateUI()
+--==============================================================
+-- TOGGLE
+--==============================================================
 
-------------------------------------------------------------
--- BUTTON CLICK
-------------------------------------------------------------
+local function CreateToggle(name, description, callback)
 
-ToggleButton.MouseButton1Click:Connect(function()
+	local Card = Instance.new("TextButton")
 
-	if State.Mode == "EXITING" then
+	Card.Size = UDim2.new(1, -4, 0, 62)
+	Card.BackgroundColor3 = COLORS.Card
+	Card.BorderSizePixel = 0
+	Card.Text = ""
+	Card.AutoButtonColor = false
+	Card.Parent = Content
 
-		-- Clicar novamente cancela a tentativa
-		-- de desligar e volta para ON.
+	local Corner = Instance.new("UICorner")
+	Corner.CornerRadius = UDim.new(0, 13)
+	Corner.Parent = Card
 
-		State.Mode = "ON"
-		State.ExitAccumulator = 0
+	local Name = Instance.new("TextLabel")
 
-		updateUI()
+	Name.Size = UDim2.new(1, -85, 0, 22)
+	Name.Position = UDim2.fromOffset(14, 9)
 
-		return
+	Name.BackgroundTransparency = 1
+
+	Name.Text = name
+	Name.Font = Enum.Font.GothamSemibold
+	Name.TextSize = 14
+	Name.TextColor3 = COLORS.Text
+
+	Name.TextXAlignment =
+		Enum.TextXAlignment.Left
+
+	Name.Parent = Card
+
+	local Desc = Instance.new("TextLabel")
+
+	Desc.Size = UDim2.new(1, -85, 0, 19)
+	Desc.Position = UDim2.fromOffset(14, 32)
+
+	Desc.BackgroundTransparency = 1
+
+	Desc.Text = description
+	Desc.Font = Enum.Font.Gotham
+	Desc.TextSize = 10
+	Desc.TextColor3 = COLORS.SubText
+
+	Desc.TextXAlignment =
+		Enum.TextXAlignment.Left
+
+	Desc.Parent = Card
+
+	local Switch = Instance.new("Frame")
+
+	Switch.Size = UDim2.fromOffset(46, 25)
+	Switch.Position = UDim2.new(
+		1,
+		-59,
+		0.5,
+		-12
+	)
+
+	Switch.BackgroundColor3 = COLORS.Disabled
+	Switch.BorderSizePixel = 0
+	Switch.Parent = Card
+
+	Instance.new(
+		"UICorner",
+		Switch
+	).CornerRadius = UDim.new(1, 0)
+
+	local Circle = Instance.new("Frame")
+
+	Circle.Size = UDim2.fromOffset(19, 19)
+	Circle.Position = UDim2.fromOffset(3, 3)
+
+	Circle.BackgroundColor3 =
+		Color3.new(1, 1, 1)
+
+	Circle.BorderSizePixel = 0
+	Circle.Parent = Switch
+
+	Instance.new(
+		"UICorner",
+		Circle
+	).CornerRadius = UDim.new(1, 0)
+
+	local enabled = false
+
+	local function SetState(state)
+
+		enabled = state
+
+		TweenService:Create(
+			Switch,
+			TweenInfo.new(0.18),
+			{
+				BackgroundColor3 =
+					state
+					and COLORS.Enabled
+					or COLORS.Disabled
+			}
+		):Play()
+
+		TweenService:Create(
+			Circle,
+			TweenInfo.new(0.18),
+			{
+				Position =
+					state
+					and UDim2.fromOffset(24, 3)
+					or UDim2.fromOffset(3, 3)
+			}
+		):Play()
+
+		callback(state)
 	end
 
-	toggleNoclip()
-end)
+	Card.MouseButton1Click:Connect(function()
+		SetState(not enabled)
+	end)
 
-------------------------------------------------------------
--- BUTTON ANIMATION
-------------------------------------------------------------
+	Card.MouseEnter:Connect(function()
 
-ToggleButton.MouseEnter:Connect(function()
+		TweenService:Create(
+			Card,
+			TweenInfo.new(0.12),
+			{
+				BackgroundColor3 =
+					COLORS.CardHover
+			}
+		):Play()
 
-	TweenService:Create(
+	end)
 
-		ToggleButton,
+	Card.MouseLeave:Connect(function()
 
-		TweenInfo.new(
-			0.12
-		),
+		TweenService:Create(
+			Card,
+			TweenInfo.new(0.12),
+			{
+				BackgroundColor3 =
+					COLORS.Card
+			}
+		):Play()
 
-		{
-			BackgroundTransparency = 0.12
-		}
+	end)
 
-	):Play()
-end)
+	return {
+		Set = SetState
+	}
+end
 
-ToggleButton.MouseLeave:Connect(function()
+--==============================================================
+-- VALUE SELECTOR
+--==============================================================
 
-	TweenService:Create(
+local function CreateSelector(
+	name,
+	getText,
+	leftCallback,
+	rightCallback
+)
 
-		ToggleButton,
+	local Card = Instance.new("Frame")
 
-		TweenInfo.new(
-			0.12
-		),
+	Card.Size = UDim2.new(1, -4, 0, 58)
+	Card.BackgroundColor3 = COLORS.Card
+	Card.BorderSizePixel = 0
+	Card.Parent = Content
 
-		{
-			BackgroundTransparency = 0
-		}
+	Instance.new(
+		"UICorner",
+		Card
+	).CornerRadius = UDim.new(0, 13)
 
-	):Play()
-end)
+	local Name = Instance.new("TextLabel")
 
-------------------------------------------------------------
--- KEYBINDS
-------------------------------------------------------------
+	Name.Size = UDim2.new(0.45, 0, 1, 0)
+	Name.Position = UDim2.fromOffset(14, 0)
 
-UserInputService.InputBegan:Connect(
-	function(input, gameProcessed)
+	Name.BackgroundTransparency = 1
 
-		if gameProcessed then
-			return
-		end
+	Name.Text = name
+	Name.Font = Enum.Font.GothamSemibold
+	Name.TextSize = 13
+	Name.TextColor3 = COLORS.Text
 
-		-- Não ativa tecla enquanto o player
-		-- estiver escrevendo em TextBox.
+	Name.TextXAlignment =
+		Enum.TextXAlignment.Left
 
-		if UserInputService:GetFocusedTextBox() then
-			return
-		end
+	Name.Parent = Card
 
-		if input.KeyCode == CONFIG.ToggleKey then
+	local Minus = Instance.new("TextButton")
 
-			if State.Mode == "EXITING" then
+	Minus.Size = UDim2.fromOffset(36, 36)
 
-				State.Mode = "ON"
-				State.ExitAccumulator = 0
+	Minus.Position =
+		UDim2.new(
+			1,
+			-132,
+			0.5,
+			-18
+		)
 
-				updateUI()
+	Minus.BackgroundColor3 =
+		Color3.fromRGB(38, 41, 52)
 
-			else
+	Minus.BorderSizePixel = 0
 
-				toggleNoclip()
-			end
+	Minus.Text = "−"
+	Minus.Font = Enum.Font.GothamBold
+	Minus.TextSize = 18
+	Minus.TextColor3 = COLORS.Text
 
-		elseif input.KeyCode == CONFIG.GuiKey then
+	Minus.Parent = Card
 
-			State.GuiVisible =
-				not State.GuiVisible
+	Instance.new(
+		"UICorner",
+		Minus
+	).CornerRadius = UDim.new(0, 9)
 
-			Main.Visible =
-				State.GuiVisible
-		end
+	local Value = Instance.new("TextLabel")
+
+	Value.Size = UDim2.fromOffset(50, 36)
+
+	Value.Position =
+		UDim2.new(
+			1,
+			-91,
+			0.5,
+			-18
+		)
+
+	Value.BackgroundTransparency = 1
+
+	Value.Text = getText()
+
+	Value.Font = Enum.Font.GothamBold
+	Value.TextSize = 12
+	Value.TextColor3 = COLORS.Accent2
+
+	Value.Parent = Card
+
+	local Plus = Instance.new("TextButton")
+
+	Plus.Size = UDim2.fromOffset(36, 36)
+
+	Plus.Position =
+		UDim2.new(
+			1,
+			-43,
+			0.5,
+			-18
+		)
+
+	Plus.BackgroundColor3 =
+		Color3.fromRGB(38, 41, 52)
+
+	Plus.BorderSizePixel = 0
+
+	Plus.Text = "+"
+	Plus.Font = Enum.Font.GothamBold
+	Plus.TextSize = 18
+	Plus.TextColor3 = COLORS.Text
+
+	Plus.Parent = Card
+
+	Instance.new(
+		"UICorner",
+		Plus
+	).CornerRadius = UDim.new(0, 9)
+
+	local function Refresh()
+		Value.Text = getText()
+	end
+
+	Minus.MouseButton1Click:Connect(function()
+
+		leftCallback()
+		Refresh()
+
+	end)
+
+	Plus.MouseButton1Click:Connect(function()
+
+		rightCallback()
+		Refresh()
+
+	end)
+
+	return Refresh
+end
+
+--==============================================================
+-- UI OPTIONS
+--==============================================================
+
+CreateSection("Combat")
+
+CreateToggle(
+	"Aimbot",
+	"Mira automaticamente no alvo",
+	function(state)
+		Settings.Aimbot = state
 	end
 )
 
-------------------------------------------------------------
--- DRAGGING SYSTEM
-------------------------------------------------------------
-
-local dragging = false
-local dragInput = nil
-local dragStart = nil
-local startPosition = nil
-
-Main.InputBegan:Connect(function(input)
-
-	if input.UserInputType
-			== Enum.UserInputType.MouseButton1
-
-		or input.UserInputType
-			== Enum.UserInputType.Touch
-	then
-
-		dragging = true
-
-		dragStart =
-			input.Position
-
-		startPosition =
-			Main.Position
-
-		input.Changed:Connect(function()
-
-			if input.UserInputState
-				== Enum.UserInputState.End
-			then
-
-				dragging = false
-			end
-		end)
+CreateToggle(
+	"Wall Check",
+	"Ignora jogadores atrás da parede",
+	function(state)
+		Settings.WallCheck = state
 	end
-end)
+)
 
-Main.InputChanged:Connect(function(input)
-
-	if input.UserInputType
-		== Enum.UserInputType.MouseMovement
-
-		or input.UserInputType
-		== Enum.UserInputType.Touch
-	then
-
-		dragInput = input
+CreateToggle(
+	"Team Check",
+	"Ignora jogadores do seu time",
+	function(state)
+		Settings.TeamCheck = state
 	end
-end)
+)
 
-UserInputService.InputChanged:Connect(function(input)
+CreateSection("Visual")
 
-	if input ~= dragInput then
-		return
+CreateToggle(
+	"ESP",
+	"Highlight através das paredes",
+	function(state)
+		Settings.ESP = state
 	end
+)
 
-	if not dragging then
-		return
+CreateToggle(
+	"Nome + distância",
+	"Mostra informações acima do jogador",
+	function(state)
+		Settings.ESPNames = state
 	end
+)
 
-	local delta =
-		input.Position
-		- dragStart
+CreateToggle(
+	"FOV",
+	"Mostra a área de alcance do Aimbot",
+	function(state)
+		Settings.ShowFOV = state
+	end
+)
 
-	Main.Position =
-		UDim2.new(
+CreateSection("Configuração")
 
-			startPosition.X.Scale,
+CreateSelector(
+	"FOV",
 
-			startPosition.X.Offset
-				+ delta.X,
+	function()
+		return tostring(Settings.FOV)
+	end,
 
-			startPosition.Y.Scale,
+	function()
 
-			startPosition.Y.Offset
-				+ delta.Y
+		Settings.FOV =
+			math.max(
+				50,
+				Settings.FOV - 25
+			)
+
+	end,
+
+	function()
+
+		Settings.FOV =
+			math.min(
+				600,
+				Settings.FOV + 25
+			)
+
+	end
+)
+
+CreateSelector(
+	"Suavidade",
+
+	function()
+
+		return string.format(
+			"%.2f",
+			Settings.Smoothness
 		)
-end)
 
-------------------------------------------------------------
--- SCRIPT CLEANUP
-------------------------------------------------------------
+	end,
 
-script.Destroying:Connect(function()
+	function()
 
-	--------------------------------------------------------
-	-- Restaura tudo antes do script desaparecer
-	--------------------------------------------------------
+		Settings.Smoothness =
+			math.clamp(
+				Settings.Smoothness - 0.05,
+				0.05,
+				1
+			)
 
-	restoreAllParts()
+	end,
 
-	disconnectCharacterConnections()
+	function()
 
-	for part, connection in pairs(PartConnections) do
+		Settings.Smoothness =
+			math.clamp(
+				Settings.Smoothness + 0.05,
+				0.05,
+				1
+			)
 
-		if connection then
-			connection:Disconnect()
+	end
+)
+
+--==============================================================
+-- AIM PART
+--==============================================================
+
+CreateSelector(
+	"Mira",
+
+	function()
+
+		if Settings.AimPart == "Head" then
+			return "HEAD"
 		end
 
-		PartConnections[part] = nil
-	end
+		return "BODY"
+	end,
 
-	if ScreenGui then
-		ScreenGui:Destroy()
+	function()
+
+		if Settings.AimPart == "Head" then
+			Settings.AimPart =
+				"HumanoidRootPart"
+		else
+			Settings.AimPart =
+				"Head"
+		end
+
+	end,
+
+	function()
+
+		if Settings.AimPart == "Head" then
+			Settings.AimPart =
+				"HumanoidRootPart"
+		else
+			Settings.AimPart =
+				"Head"
+		end
+
 	end
+)
+
+--==============================================================
+-- MINIMIZED BUTTON
+--==============================================================
+
+local OpenButton = Instance.new("TextButton")
+
+OpenButton.Name = "OpenButton"
+
+OpenButton.Size = UDim2.fromOffset(58, 58)
+OpenButton.Position = UDim2.new(
+	0,
+	20,
+	0.5,
+	-29
+)
+
+OpenButton.BackgroundColor3 = COLORS.Accent
+OpenButton.BorderSizePixel = 0
+
+OpenButton.Text = "S"
+OpenButton.Font = Enum.Font.GothamBold
+OpenButton.TextSize = 23
+OpenButton.TextColor3 = Color3.new(1, 1, 1)
+
+OpenButton.Visible = false
+OpenButton.AutoButtonColor = false
+
+OpenButton.ZIndex = 50
+OpenButton.Parent = Gui
+
+Instance.new(
+	"UICorner",
+	OpenButton
+).CornerRadius = UDim.new(1, 0)
+
+local OpenStroke =
+	Instance.new("UIStroke")
+
+OpenStroke.Color =
+	Color3.fromRGB(200, 190, 255)
+
+OpenStroke.Thickness = 1.5
+OpenStroke.Parent = OpenButton
+
+--==============================================================
+-- MINIMIZE / OPEN
+--==============================================================
+
+Minimize.MouseButton1Click:Connect(function()
+
+	Main.Visible = false
+	OpenButton.Visible = true
+
 end)
 
-------------------------------------------------------------
--- READY
-------------------------------------------------------------
+OpenButton.MouseButton1Click:Connect(function()
+
+	OpenButton.Visible = false
+	Main.Visible = true
+
+end)
+
+--==============================================================
+-- DRAG
+--==============================================================
+
+local function MakeDraggable(handle, object)
+
+	local dragging = false
+	local dragInput = nil
+
+	local dragStart = nil
+	local startPos = nil
+
+	handle.InputBegan:Connect(function(input)
+
+		if
+			input.UserInputType
+				== Enum.UserInputType.MouseButton1
+			or input.UserInputType
+				== Enum.UserInputType.Touch
+		then
+
+			dragging = true
+
+			dragStart = input.Position
+			startPos = object.Position
+
+			input.Changed:Connect(function()
+
+				if
+					input.UserInputState
+						== Enum.UserInputState.End
+				then
+					dragging = false
+				end
+
+			end)
+
+		end
+
+	end)
+
+	handle.InputChanged:Connect(function(input)
+
+		if
+			input.UserInputType
+				== Enum.UserInputType.MouseMovement
+			or input.UserInputType
+				== Enum.UserInputType.Touch
+		then
+			dragInput = input
+		end
+
+	end)
+
+	UIS.InputChanged:Connect(function(input)
+
+		if
+			dragging
+			and input == dragInput
+		then
+
+			local delta =
+				input.Position - dragStart
+
+			object.Position =
+				UDim2.new(
+					startPos.X.Scale,
+					startPos.X.Offset
+						+ delta.X,
+
+					startPos.Y.Scale,
+					startPos.Y.Offset
+						+ delta.Y
+				)
+
+		end
+
+	end)
+
+end
+
+MakeDraggable(TopBar, Main)
+MakeDraggable(OpenButton, OpenButton)
+
+--==============================================================
+-- ESP
+--==============================================================
+
+local ESPObjects = {}
+
+local function DestroyESP(player)
+
+	local data = ESPObjects[player]
+
+	if not data then
+		return
+	end
+
+	if data.Highlight then
+		data.Highlight:Destroy()
+	end
+
+	if data.Tag then
+		data.Tag:Destroy()
+	end
+
+	ESPObjects[player] = nil
+
+end
+
+local function CreateESP(player)
+
+	if player == LocalPlayer then
+		return
+	end
+
+	DestroyESP(player)
+
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local humanoid =
+		character:FindFirstChildOfClass(
+			"Humanoid"
+		)
+
+	local root =
+		character:FindFirstChild(
+			"HumanoidRootPart"
+		)
+
+	local head =
+		character:FindFirstChild(
+			"Head"
+		)
+
+	if
+		not humanoid
+		or not root
+		or not head
+	then
+		return
+	end
+
+	--==============================
+	-- CHAMS
+	--==============================
+
+	local Highlight =
+		Instance.new("Highlight")
+
+	Highlight.Name =
+		"ESP_" .. player.Name
+
+	Highlight.Adornee = character
+
+	Highlight.DepthMode =
+		Enum.HighlightDepthMode.AlwaysOnTop
+
+	Highlight.FillColor = COLORS.ESP
+	Highlight.FillTransparency = 0.62
+
+	Highlight.OutlineColor =
+		Color3.fromRGB(255, 255, 255)
+
+	Highlight.OutlineTransparency = 0
+
+	Highlight.Enabled = false
+
+	Highlight.Parent = character
+
+	--==============================
+	-- NAME TAG
+	--==============================
+
+	local Tag =
+		Instance.new("BillboardGui")
+
+	Tag.Name = "ESPTag"
+
+	Tag.Adornee = head
+
+	Tag.Size =
+		UDim2.fromOffset(
+			200,
+			45
+		)
+
+	Tag.StudsOffset =
+		Vector3.new(
+			0,
+			2.7,
+			0
+		)
+
+	Tag.AlwaysOnTop = true
+
+	Tag.Enabled = false
+
+	Tag.Parent = PlayerGui
+
+	local Text =
+		Instance.new("TextLabel")
+
+	Text.Name = "Text"
+
+	Text.Size =
+		UDim2.fromScale(
+			1,
+			1
+		)
+
+	Text.BackgroundTransparency = 1
+
+	Text.Text =
+		player.DisplayName
+
+	Text.Font =
+		Enum.Font.GothamBold
+
+	Text.TextSize = 13
+
+	Text.TextColor3 =
+		Color3.fromRGB(
+			255,
+			255,
+			255
+		)
+
+	Text.TextStrokeTransparency = 0.35
+
+	Text.Parent = Tag
+
+	ESPObjects[player] = {
+		Highlight = Highlight,
+		Tag = Tag,
+		Text = Text
+	}
+
+end
+
+--==============================================================
+-- PLAYER SETUP
+--==============================================================
+
+local function SetupPlayer(player)
+
+	if player == LocalPlayer then
+		return
+	end
+
+	player.CharacterAdded:Connect(function()
+
+		task.wait(0.5)
+
+		CreateESP(player)
+
+	end)
+
+	player.CharacterRemoving:Connect(function()
+
+		DestroyESP(player)
+
+	end)
+
+	if player.Character then
+
+		task.defer(function()
+			CreateESP(player)
+		end)
+
+	end
+
+end
+
+for _, player in ipairs(
+	Players:GetPlayers()
+) do
+
+	SetupPlayer(player)
+
+end
+
+Players.PlayerAdded:Connect(
+	SetupPlayer
+)
+
+Players.PlayerRemoving:Connect(
+	DestroyESP
+)
+
+--==============================================================
+-- TEAM CHECK
+--==============================================================
+
+local function IsTeammate(player)
+
+	if not Settings.TeamCheck then
+		return false
+	end
+
+	if LocalPlayer.Team == nil then
+		return false
+	end
+
+	return player.Team == LocalPlayer.Team
+
+end
+
+--==============================================================
+-- WALL CHECK
+--==============================================================
+
+local RayParams =
+	RaycastParams.new()
+
+RayParams.FilterType =
+	Enum.RaycastFilterType.Exclude
+
+RayParams.IgnoreWater = true
+
+local function IsVisible(
+	character,
+	targetPart
+)
+
+	if not Settings.WallCheck then
+		return true
+	end
+
+	local camera =
+		workspace.CurrentCamera
+
+	if not camera then
+		return false
+	end
+
+	local ignore = {}
+
+	if LocalPlayer.Character then
+
+		table.insert(
+			ignore,
+			LocalPlayer.Character
+		)
+
+	end
+
+	RayParams.FilterDescendantsInstances =
+		ignore
+
+	local origin =
+		camera.CFrame.Position
+
+	local direction =
+		targetPart.Position
+		- origin
+
+	local result =
+		workspace:Raycast(
+			origin,
+			direction,
+			RayParams
+		)
+
+	if not result then
+		return true
+	end
+
+	return
+		result.Instance
+			:IsDescendantOf(
+				character
+			)
+
+end
+
+--==============================================================
+-- GET TARGET
+--==============================================================
+
+local function GetClosestTarget()
+
+	local camera =
+		workspace.CurrentCamera
+
+	if not camera then
+		return nil
+	end
+
+	local viewport =
+		camera.ViewportSize
+
+	local center =
+		Vector2.new(
+			viewport.X / 2,
+			viewport.Y / 2
+		)
+
+	local closestPart = nil
+	local closestPlayer = nil
+
+	local closestDistance =
+		Settings.FOV
+
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+
+		if
+			player ~= LocalPlayer
+			and not IsTeammate(player)
+		then
+
+			local character =
+				player.Character
+
+			if character then
+
+				local humanoid =
+					character:
+					FindFirstChildOfClass(
+						"Humanoid"
+					)
+
+				local targetPart =
+					character:
+					FindFirstChild(
+						Settings.AimPart
+					)
+
+				if not targetPart then
+
+					targetPart =
+						character:
+						FindFirstChild(
+							"HumanoidRootPart"
+						)
+
+				end
+
+				if
+					humanoid
+					and humanoid.Health > 0
+					and targetPart
+					and IsVisible(
+						character,
+						targetPart
+					)
+				then
+
+					local position,
+						onScreen =
+						camera:
+						WorldToViewportPoint(
+							targetPart.Position
+						)
+
+					if
+						onScreen
+						and position.Z > 0
+					then
+
+						local screenPosition =
+							Vector2.new(
+								position.X,
+								position.Y
+							)
+
+						local distance =
+							(
+								screenPosition
+								- center
+							).Magnitude
+
+						if
+							distance
+								< closestDistance
+						then
+
+							closestDistance =
+								distance
+
+							closestPart =
+								targetPart
+
+							closestPlayer =
+								player
+
+						end
+
+					end
+
+				end
+
+			end
+
+		end
+
+	end
+
+	return
+		closestPart,
+		closestPlayer
+
+end
+
+--==============================================================
+-- ESP UPDATE
+--==============================================================
+
+local lastESPUpdate = 0
+
+local function UpdateESP()
+
+	if
+		os.clock() - lastESPUpdate
+		< 0.08
+	then
+		return
+	end
+
+	lastESPUpdate = os.clock()
+
+	local myCharacter =
+		LocalPlayer.Character
+
+	local myRoot =
+		myCharacter
+		and myCharacter:
+			FindFirstChild(
+				"HumanoidRootPart"
+			)
+
+	for player, data in pairs(
+		ESPObjects
+	) do
+
+		local character =
+			player.Character
+
+		local humanoid =
+			character
+			and character:
+				FindFirstChildOfClass(
+					"Humanoid"
+				)
+
+		local root =
+			character
+			and character:
+				FindFirstChild(
+					"HumanoidRootPart"
+				)
+
+		local alive =
+			humanoid
+			and humanoid.Health > 0
+			and root
+
+		local show =
+			Settings.ESP
+			and alive
+			and not IsTeammate(player)
+
+		if data.Highlight then
+
+			data.Highlight.Enabled =
+				show
+
+		end
+
+		if data.Tag then
+
+			data.Tag.Enabled =
+				show
+				and Settings.ESPNames
+
+		end
+
+		if
+			show
+			and Settings.ESPNames
+			and data.Text
+			and myRoot
+			and root
+		then
+
+			local distance =
+				(
+					myRoot.Position
+					- root.Position
+				).Magnitude
+
+			data.Text.Text =
+				player.DisplayName
+				.. "\n"
+				.. math.floor(distance)
+				.. " studs"
+
+		end
+
+	end
+
+end
+
+--==============================================================
+-- AIMBOT
+--==============================================================
+
+pcall(function()
+
+	RunService:
+		UnbindFromRenderStep(
+			"Souza_Aimbot"
+		)
+
+end)
+
+RunService:BindToRenderStep(
+	"Souza_Aimbot",
+
+	Enum.RenderPriority.Camera.Value
+		+ 10,
+
+	function()
+
+		local camera =
+			workspace.CurrentCamera
+
+		if not camera then
+			return
+		end
+
+		--==============================
+		-- FOV
+		--==============================
+
+		local viewport =
+			camera.ViewportSize
+
+		local center =
+			Vector2.new(
+				viewport.X / 2,
+				viewport.Y / 2
+			)
+
+		FOVCircle.Position =
+			UDim2.fromOffset(
+				center.X,
+				center.Y
+			)
+
+		FOVCircle.Size =
+			UDim2.fromOffset(
+				Settings.FOV * 2,
+				Settings.FOV * 2
+			)
+
+		FOVCircle.Visible =
+			Settings.ShowFOV
+
+		--==============================
+		-- ESP
+		--==============================
+
+		UpdateESP()
+
+		--==============================
+		-- AIM
+		--==============================
+
+		if not Settings.Aimbot then
+			return
+		end
+
+		local target =
+			GetClosestTarget()
+
+		if not target then
+			return
+		end
+
+		if not target.Parent then
+			return
+		end
+
+		local cameraPosition =
+			camera.CFrame.Position
+
+		local desired =
+			CFrame.lookAt(
+				cameraPosition,
+				target.Position
+			)
+
+		local alpha =
+			math.clamp(
+				Settings.Smoothness,
+				0.05,
+				1
+			)
+
+		camera.CFrame =
+			camera.CFrame:Lerp(
+				desired,
+				alpha
+			)
+
+	end
+)
+
+--==============================================================
+-- RESPAWN
+--==============================================================
+
+LocalPlayer.CharacterAdded:Connect(
+	function()
+
+		task.wait(0.5)
+
+	end
+)
 
 print(
-	"[ULTRA NOCLIP] Loaded successfully."
+	"[SOUZA AIM] Interface carregada."
 )
