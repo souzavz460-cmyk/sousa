@@ -1,22 +1,4 @@
--- S4zx ClientPanel v1 | UM LocalScript em StarterPlayer > StarterPlayerScripts.
--- APIs normais do Roblox Studio; nao depende de executor, Drawing ou remotes novos.
--- Valores encontrados por nome sao CANDIDATOS, nunca prova de autoridade client-side.
--- Nao e possivel inspecionar closures/tabelas privadas de outros LocalScripts.
---
--- Compatibilidade opcional com armas JA integradas:
--- Um ModuleScript dentro da Tool pode declarar o atributo S4zxClientAPI = 1.
--- Somente esse modulo explicitamente identificado sera carregado. Nao crie outro
--- script para usar painel/ESP/mira/movimento; sem API existente, armas ficam indisponiveis.
--- Esse contrato NAO e uma API padrao do Roblox, nem um adaptador universal.
--- A tabela retornada deve ter Version=1, Tool=<Tool>, Authority="Client",
--- Capabilities={FireSpeed=true,...}, Config={FireDelay=0.2,...} opcional.
--- Metodos (com self), SINCRONOS e sem yield, retornam true para sucesso:
--- :SetConfig(key,value) -- atualiza a configuracao realmente consumida pela arma;
--- :GetAmmo() -> current,max; :Reload(); :SetSilentTarget(partOuNil);
--- :FireAt(part); :FlyKill(part). Os ultimos sao somente para logica local existente.
--- FireAt deve respeitar cooldown/municao. O painel nunca promete dano no servidor.
--- Modulos sem esse contrato nao sao executados; API marcada ainda e codigo do seu jogo.
-
+-- S4zx ClientPanel v1.1 | Atualizado com Modos de Aimbot e Correção de Câmera/Corpo
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -36,7 +18,7 @@ local UI, Connections, ESPManager, Targeting = {}, {}, {}, {}
 local WeaponScanner, WeaponModifier, CharacterManager = {}, {}, {}
 local alive = true
 local defaults = {
-    Aimbot=false, Silent=false, AimKill=false, IgnoreBots=true, IgnoreTeam=true,
+    Aimbot=false, AimMode="Sempre", Silent=false, AimKill=false, IgnoreBots=true, IgnoreTeam=true,
     Visibility=true, ShowFOV=false, FOV=140, Smooth=12, AimPart="Head",
     ESP=false, Highlight=true, Box=false, Name=true, Distance=true, Health=true,
     Tracer=false, Skeleton=false, AutoReload=false, FireSpeed=false, FireLevel=2,
@@ -183,7 +165,6 @@ local function selector(page,key,title,values,format,description)
     local plus=button(frame,"+",UDim2.new(1,-58,0,9),UDim2.fromOffset(44,44))
     local value=text(frame,"",14,UDim2.new(1,-129,0,12),UDim2.fromOffset(71,38))
     value.TextXAlignment=Enum.TextXAlignment.Center
-    -- Title has its own left column; controls never overlap it.
     frame:FindFirstChildOfClass("TextLabel").Size=UDim2.new(1,-195,0,32)
     UI.rows[key]={value=value,format=format or tostring}
     local function step(direction)
@@ -253,7 +234,24 @@ Connections.add("UI",UIS.InputChanged,function(input)
 end)
 Connections.add("UI",UIS.InputEnded,function(input) if input==dragInput then dragInput=nil end end)
 
--- PERSONAGEM: captura valores antes de escrever; restaura no toggle, respawn e teardown.
+-- CONTROLE DE INPUTS PARA AIMBOT (Mirar ou Atirar)
+local isAiming = false
+local isShooting = false
+Connections.add("UI", UIS.InputBegan, function(input, processed)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        isAiming = true
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+        isShooting = true
+    end
+end)
+Connections.add("UI", UIS.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        isAiming = false
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+        isShooting = false
+    end
+end)
+
 CharacterManager.original={}
 function CharacterManager.restore()
     local h=CharacterManager.humanoid
@@ -318,7 +316,6 @@ end)
 Connections.add("UI",UIS.InputEnded,function(input) flightInputs[input]=nil end)
 Connections.add("UI",UIS.WindowFocusReleased,function() table.clear(flightInputs); dragInput=nil end)
 
--- ALVOS: uma varredura inicial; depois apenas eventos, com partes cacheadas.
 Targeting.records={}
 local function rebuildRig(record)
     local model=record.model
@@ -390,7 +387,6 @@ UI.fov=create("Frame",{AnchorPoint=Vector2.new(0.5,0.5),BackgroundTransparency=1
 create("UICorner",{CornerRadius=UDim.new(1,0)},UI.fov)
 create("UIStroke",{Color=neon,Thickness=1,Transparency=0.25},UI.fov)
 
--- ESP: objetos criados uma vez por alvo; nenhuma conexao por frame/por jogador.
 ESPManager.items={}
 ESPManager.folder=create("Folder",{Name="S4zxLocalHighlights"},Workspace)
 function ESPManager.remove(record)
@@ -494,7 +490,6 @@ function ESPManager.update(camera)
     end
 end
 
--- SCANNER: indexa somente Tools locais. Descendants nunca sao varridos por frame.
 local aliases={
     Ammo={"ammo","currentammo","bullets","magazine","mag","clip","ammocount"},
     MaxAmmo={"maxammo","maxbullets","magazinesize","magsize","clipsize","maxclip","capacity"},
@@ -549,8 +544,6 @@ function WeaponScanner.track(tool)
     Connections.add(record,tool.DescendantAdded,function() record.dirty=true end)
     Connections.add(record,tool.DescendantRemoving,function() record.dirty=true end)
     Connections.add(record,tool.AncestryChanged,function() WeaponScanner.dirty=true end)
-    -- AttributeChanged cobre novos nomes de atributos na Tool; um refresh manual
-    -- tambem cobre atributos acrescentados a descendentes sem mudanca estrutural.
     Connections.add(record,tool.AttributeChanged,function() record.dirty=true end)
     WeaponScanner.dirty=true
 end
@@ -560,7 +553,6 @@ end
 local function callAPI(api,method,...)
     local fn=api and api[method]
     if type(fn)~="function" then return false,"Método ausente" end
-    -- Isola erros e rejeita metodos que cedem, evitando loops concorrentes.
     local thread=coroutine.create(fn)
     local ok,a,b=coroutine.resume(thread,api,...)
     if coroutine.status(thread)~="dead" then
@@ -586,7 +578,6 @@ local function loadAPI(record)
     local generation=WeaponScanner.serial
     local thread
     thread=task.defer(function()
-        -- require pode falhar ou ceder; executado fora do loop de renderizacao.
         local ok,api=pcall(require,module)
         record.loading=false; record.thread=nil
         if not alive or not owned(record.tool) or generation~=WeaponScanner.serial then return end
@@ -608,7 +599,6 @@ local function findConfig(api,category)
     end
     table.sort(matches,function(a,b) return a.rank<b.rank end)
     if #matches==0 then return nil,"Configuração compatível não encontrada" end
-    -- FireRate e AttackSpeed sao ambiguos: podem ser intervalo ou frequencia.
     local choice=matches[1]
     local name=normalize(choice.key)
     if category=="FireSpeed" then
@@ -648,7 +638,6 @@ function WeaponModifier.restoreKey(key)
     if not saved then return true end
     local ok,result=callAPI(saved.api,"SetConfig",saved.key,saved.value)
     if ok and result==true then WeaponModifier.originals[key]=nil; return true end
-    -- Preserva snapshot para nova tentativa; nao anuncia restauracao que falhou.
     WeaponModifier.errors[key]="A arma recusou restaurar o valor original"
     UI.message("Falha ao restaurar "..key.."; confira a API da arma")
     return false
@@ -821,7 +810,6 @@ function WeaponModifier.tick(target)
     end
 end
 
--- CONTROLES
 local shutdown
 local function stopESPs()
     for _,key in ipairs({"ESP","Highlight","Box","Name","Distance","Health","Tracer","Skeleton"}) do State[key]=false end
@@ -859,7 +847,11 @@ onChange=function(key,value)
     appearance(); UI.refresh()
 end
 Connections.add("UI",moon.Activated,function() onChange("Dark",not State.Dark) end)
+
+-- MENU DE CONFIGURAÇÃO DO AIMBOT (Com o novo seletor de modo)
 toggle(1,"Aimbot","Aimbot","Mira por câmera enquanto ligado; alvos dentro do FOV.")
+selector(1,"AimMode","Modo do Aimbot",{"Sempre","Ao Mirar","Ao Atirar"},tostring,"Quando o aimbot deve puxar a mira.")
+
 toggle(1,"Silent","Silent","Requer integração real com a direção de disparo da arma.")
 toggle(1,"AimKill","AimKill","Seleciona alvos e chama disparo local compatível; sem prometer dano.")
 toggle(1,"IgnoreBots","Ignorar Bots","Ligado: apenas jogadores. Desligado: inclui NPCs com Humanoid.")
@@ -869,6 +861,7 @@ toggle(1,"ShowFOV","Mostrar FOV","Círculo em pixels ao redor do centro da tela.
 selector(1,"FOV","Raio do FOV",{50,80,100,140,180,220,280,350,450},function(v) return v.." px" end)
 selector(1,"Smooth","Suavização",{0,4,8,12,18,25,40},tostring,"0 = instantâneo. Valores maiores tornam a transição mais suave.")
 selector(1,"AimPart","Parte alvo",{"Head","HumanoidRootPart"},function(v) return v=="Head" and "Cabeça" or "Centro" end)
+
 toggle(2,"ESP","ESP Master","Ativa o gerenciador; desligar destrói todos os objetos ESP.")
 for _,spec in ipairs({{"Highlight","ESP Highlight","AlwaysOnTop: destaque através de objetos."},
     {"Box","ESP Box","Caixa projetada a partir das partes do personagem."},
@@ -877,6 +870,7 @@ for _,spec in ipairs({{"Highlight","ESP Highlight","AlwaysOnTop: destaque atrav�
     {"Health","ESP Health","Barra e valor atual de vida."},
     {"Tracer","ESP Tracer","Linha da base da tela até o personagem."},
     {"Skeleton","ESP Skeleton","Linhas entre partes conectadas por Motor6D; R6/R15."}}) do toggle(2,spec[1],spec[2],spec[3]) end
+
 local scannerCard
 scannerCard,scannerLabel=card(3,"Scanner automático","Aguardando Tool…",174)
 scannerLabel.Size=UDim2.new(1,-34,0,122)
@@ -920,7 +914,6 @@ toggle(5,"Logo","Mostrar logo","Exibe a logo no cabeçalho e botão flutuante.")
 selector(5,"Size","Tamanho da interface",{0.7,0.85,1,1.1,1.2},function(v) return math.floor(v*100).."%" end,"Limitado automaticamente à área disponível da tela.")
 action(5,"Destruir interface","Restaura valores e limpa GUI, ESP, voo e todas as conexões.",function() shutdown() end)
 
--- CICLO DE VIDA: um callback de render, um Heartbeat, ambos removidos no teardown.
 local binding="S4zxPanel_"..HttpService:GenerateGUID(false)
 shutdown=function()
     if not alive then return end
@@ -960,20 +953,48 @@ if backpack then trackContainer(backpack,"Backpack") end
 CharacterManager.bind(LocalPlayer.Character)
 local targetRecord,targetPart=nil,nil
 local accumulated,espElapsed,scanElapsed=0,0,0
+
+-- RENDER STEP (Com correções de alinhamento da câmera e corpo do jogador)
 RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
     if not alive then return end
     local camera=Workspace.CurrentCamera
     if not camera then return end
-    if State.Aimbot and targetRecord and targetPart and targetPart.Parent and Targeting.valid(targetRecord) then
+    
+    -- Verifica se deve ativar o Aimbot baseado na regra selecionada
+    local shouldAim = false
+    if State.Aimbot then
+        if State.AimMode == "Sempre" then
+            shouldAim = (targetRecord ~= nil)
+        elseif State.AimMode == "Ao Mirar" then
+            shouldAim = isAiming and (targetRecord ~= nil)
+        elseif State.AimMode == "Ao Atirar" then
+            shouldAim = isShooting and (targetRecord ~= nil)
+        end
+    end
+
+    if shouldAim and targetRecord and targetPart and targetPart.Parent and Targeting.valid(targetRecord) then
         local delta=targetPart.Position-camera.CFrame.Position
         if delta.Magnitude>0.01 then
             local alpha=State.Smooth==0 and 1 or 1-math.exp(-dt*60/State.Smooth)
+            
+            -- Move a câmera suavemente para o alvo
             camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,targetPart.Position),alpha)
+            
+            -- Gira o corpo do boneco junto para não ficar travado ou com bug visual
+            local localChar = CharacterManager.character
+            if localChar and localChar:FindFirstChild("HumanoidRootPart") then
+                local rootPart = localChar.HumanoidRootPart
+                local targetPosBody = Vector3.new(targetPart.Position.X, rootPart.Position.Y, targetPart.Position.Z)
+                local targetRootCFrame = CFrame.lookAt(rootPart.Position, targetPosBody)
+                rootPart.CFrame = rootPart.CFrame:Lerp(targetRootCFrame, alpha)
+            end
         end
     end
+    
     espElapsed=espElapsed+dt
     if State.ESP and espElapsed>=1/30 then espElapsed=0; ESPManager.update(camera) end
 end)
+
 Connections.add("Loop",RunService.Heartbeat,function(dt)
     if not alive then return end
     accumulated=accumulated+dt; scanElapsed=scanElapsed+dt
@@ -996,5 +1017,6 @@ Connections.add("Loop",RunService.Heartbeat,function(dt)
         elseif State.Silent then clearSilent(WeaponScanner.current) end
     end
 end)
+
 appearance(); UI.refresh(); WeaponScanner.update(); WeaponScanner.refreshUI()
 UI.message("Pronto • controles por toque e mouse")
