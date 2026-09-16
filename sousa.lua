@@ -1,4 +1,4 @@
--- S4zx ClientPanel v1.1 | Atualizado com Modos de Aimbot e Correção de Câmera/Corpo
+-- S4zx ClientPanel v1.2 | Silent Aim Universal integrado + Correção Câmera/Corpo
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -17,16 +17,28 @@ end
 local UI, Connections, ESPManager, Targeting = {}, {}, {}, {}
 local WeaponScanner, WeaponModifier, CharacterManager = {}, {}, {}
 local alive = true
+
 local defaults = {
-    Aimbot=false, AimMode="Sempre", Silent=false, AimKill=false, IgnoreBots=true, IgnoreTeam=true,
+    Aimbot=false, AimMode="Sempre", AimKill=false, IgnoreBots=true, IgnoreTeam=true,
     Visibility=true, ShowFOV=false, FOV=140, Smooth=12, AimPart="Head",
+    -- Silent Aim Universal (hooks)
+    Silent=false, SilentTeamCheck=false, SilentVisibleCheck=false,
+    SilentTargetPart="HumanoidRootPart", SilentMethod="Raycast",
+    SilentHitChance=100, SilentPrediction=false, SilentPredictionAmount=0.165,
+    -- ESP / Visual
     ESP=false, Highlight=true, Box=false, Name=true, Distance=true, Health=true,
-    Tracer=false, Skeleton=false, AutoReload=false, FireSpeed=false, FireLevel=2,
+    Tracer=false, Skeleton=false,
+    -- Armas (API client-side da Tool)
+    AutoReload=false, FireSpeed=false, FireLevel=2,
     ProjectileSpeed=false, ProjectileLevel=2, NoRecoil=false, NoSpread=false,
+    -- Movimento
     Speed=false, WalkSpeed=24, Jump=false, JumpPower=65, JumpHeight=10,
-    Fly=false, FlySpeed=35, FlyKill=false, Dark=true, Logo=true, Size=1,
+    Fly=false, FlySpeed=35, FlyKill=false,
+    -- Interface
+    Dark=true, Logo=true, Size=1,
 }
 local State = table.clone(defaults)
+
 local groups, tweens = {}, setmetatable({}, {__mode="k"})
 function Connections.add(group, signal, callback)
     local connection = signal:Connect(callback)
@@ -63,6 +75,7 @@ local function text(parent, value, size, position, dimensions)
         TextColor3=white, BackgroundTransparency=1, TextXAlignment=Enum.TextXAlignment.Left,
         TextWrapped=true, Position=position, Size=dimensions}, parent)
 end
+
 UI.gui = create("ScreenGui", {Name=GUI_NAME, ResetOnSpawn=false, IgnoreGuiInset=false,
     DisplayOrder=50, ZIndexBehavior=Enum.ZIndexBehavior.Sibling}, PlayerGui)
 UI.overlay = create("ScreenGui", {Name="Overlay", ResetOnSpawn=false, IgnoreGuiInset=true,
@@ -102,7 +115,6 @@ create("Frame",{BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(34,53,32),
 UI.pages, UI.rows, UI.nav = {}, {}, {}
 local pageNames={"AIM / FUNÇÕES","VISUAL / ESP","ARMAS","MOVIMENTO","CONFIGURAÇÕES"}
 local icons={"⊕","◉","⚙","↑","≡"}
-local pagePositions={}
 for i,name in ipairs(pageNames) do
     local nav=button(UI.panel,icons[i],UDim2.fromOffset(17,101+(i-1)*76),UDim2.fromOffset(53,53))
     UI.nav[i]=nav
@@ -234,29 +246,27 @@ Connections.add("UI",UIS.InputChanged,function(input)
 end)
 Connections.add("UI",UIS.InputEnded,function(input) if input==dragInput then dragInput=nil end end)
 
--- CONTROLE DE INPUTS PARA AIMBOT (Mirar ou Atirar)
-local isAiming = false
-local isShooting = false
-Connections.add("UI", UIS.InputBegan, function(input, processed)
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        isAiming = true
-    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-        isShooting = true
-    end
+-- Inputs para AIMBOT (mirar/atirar)
+local isAiming, isShooting = false, false
+Connections.add("UI", UIS.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then isAiming = true
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then isShooting = true end
 end)
 Connections.add("UI", UIS.InputEnded, function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        isAiming = false
-    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-        isShooting = false
-    end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then isAiming = false
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then isShooting = false end
 end)
 
 CharacterManager.original={}
+CharacterManager.savedAutoRotate=nil
 function CharacterManager.restore()
     local h=CharacterManager.humanoid
     if h and h.Parent then
         for property,value in pairs(CharacterManager.original) do h[property]=value end
+        if CharacterManager.savedAutoRotate~=nil then
+            h.AutoRotate=CharacterManager.savedAutoRotate
+            CharacterManager.savedAutoRotate=nil
+        end
     end
     CharacterManager.original={}
 end
@@ -295,7 +305,7 @@ function CharacterManager.startFly()
     CharacterManager.attachment=create("Attachment",{Name="S4zxFlightAttachment"},root)
     CharacterManager.velocity=create("LinearVelocity",{Attachment0=CharacterManager.attachment,
         RelativeTo=Enum.ActuatorRelativeTo.World,VelocityConstraintMode=Enum.VelocityConstraintMode.Vector,
-        ForceLimitsEnabled=false,VectorVelocity=Vector3.zero},root)
+        ForceLimitsEnabled=false,VectorVectorVelocity=Vector3.zero},root)
     UI.flight.Visible=true
 end
 UI.flight=create("Frame",{Size=UDim2.fromOffset(128,62),Position=UDim2.new(1,-146,0.45,0),BackgroundTransparency=1,Visible=false},UI.safe)
@@ -382,6 +392,174 @@ function Targeting.pick(camera)
     end
     return best,bestPart
 end
+
+-- =====================================================================
+-- SILENT AIM UNIVERSAL (hooks integrados, sem UI externa)
+-- =====================================================================
+local SilentUtil = {}
+SilentUtil.ValidParts = {"Head","HumanoidRootPart"}
+SilentUtil.lastTarget = nil
+SilentUtil.lastPart = nil
+SilentUtil.lastPick = 0
+
+function SilentUtil.calculateChance(percentage)
+    percentage = math.floor(percentage or 100)
+    if percentage >= 100 then return true end
+    if percentage <= 0 then return false end
+    local chance = math.floor(Random.new():NextNumber(0,1) * 100) / 100
+    return chance <= percentage / 100
+end
+
+local function silentMousePosition()
+    local ok, pos = pcall(function() return UIS:GetMouseLocation() end)
+    if ok and pos then return pos end
+    return Vector2.new(Workspace.CurrentCamera.ViewportSize.X/2, Workspace.CurrentCamera.ViewportSize.Y/2)
+end
+
+local function silentScreenPosition(world)
+    local vec, onScreen = Workspace.CurrentCamera:WorldToViewportPoint(world)
+    return Vector2.new(vec.X, vec.Y), onScreen
+end
+
+local function silentDirection(origin, target)
+    local d = target - origin
+    if d.Magnitude < 0.001 then return Vector3.new(0,0,-1)*1000 end
+    return d.Unit * 1000
+end
+
+local function isRecordVisible(record)
+    local myChar = LocalPlayer.Character
+    if not myChar then return true end
+    local root = record.model:FindFirstChild("HumanoidRootPart") or record.head
+    if not root then return false end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = {myChar, record.model}
+    local origin = Workspace.CurrentCamera.CFrame.Position
+    local res = Workspace:Raycast(origin, root.Position - origin, rp)
+    return not res
+end
+
+-- Seleciona alvo para o silent aim (usado pelos hooks __namecall / __index)
+function SilentUtil.pick()
+    local closest, closestPart, closestDist = nil, nil, State.FOV
+    local mousePos = silentMousePosition()
+    for _, record in pairs(Targeting.records) do
+        local part = Targeting.valid(record)
+        if part then
+            local player = Players:GetPlayerFromCharacter(record.model)
+            local skip = false
+            if State.SilentTeamCheck and player and not player.Neutral and player.Team == LocalPlayer.Team then skip = true end
+            if not skip and State.SilentVisibleCheck and not isRecordVisible(record) then skip = true end
+            if not skip then
+                local targetPart
+                if State.SilentTargetPart == "Random" then
+                    targetPart = record.model:FindFirstChild(SilentUtil.ValidParts[math.random(1,#SilentUtil.ValidParts)])
+                else
+                    targetPart = record.model:FindFirstChild(State.SilentTargetPart)
+                end
+                targetPart = targetPart or record.head or record.root
+                if targetPart then
+                    local sp, onScreen = silentScreenPosition(targetPart.Position)
+                    if onScreen then
+                        local dist = (mousePos - sp).Magnitude
+                        if dist <= closestDist then
+                            closest = record
+                            closestPart = targetPart
+                            closestDist = dist
+                        end
+                    end
+                end
+            end
+        end
+    end
+    SilentUtil.lastTarget = closest
+    SilentUtil.lastPart = closestPart
+    return closest, closestPart
+end
+
+-- Hooks (só se o executor suportar)
+local hooksActive = false
+local oldNamecall, oldIndex
+local supported = type(hookmetamethod) == "function"
+    and type(getnamecallmethod) == "function"
+    and type(newcclosure) == "function"
+    and type(checkcaller) == "function"
+
+local unpackFn = table.unpack or unpack
+
+if supported then
+    local ok, err = pcall(function()
+        oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(...)
+            local method = getnamecallmethod()
+            local args = {...}
+            local self = args[1]
+            if State.Silent and self == Workspace and not checkcaller()
+                and SilentUtil.calculateChance(State.SilentHitChance) then
+                local _, part = SilentUtil.pick()
+                if part then
+                    if method == "FindPartOnRayWithIgnoreList" and State.SilentMethod == method then
+                        local ray = args[2]
+                        if typeof(ray) == "Ray" then
+                            args[2] = Ray.new(ray.Origin, silentDirection(ray.Origin, part.Position))
+                            return oldNamecall(unpackFn(args))
+                        end
+                    elseif method == "FindPartOnRayWithWhitelist" and State.SilentMethod == method then
+                        local ray = args[2]
+                        if typeof(ray) == "Ray" then
+                            args[2] = Ray.new(ray.Origin, silentDirection(ray.Origin, part.Position))
+                            return oldNamecall(unpackFn(args))
+                        end
+                    elseif (method == "FindPartOnRay" or method == "findPartOnRay")
+                        and State.SilentMethod:lower() == method:lower() then
+                        local ray = args[2]
+                        if typeof(ray) == "Ray" then
+                            args[2] = Ray.new(ray.Origin, silentDirection(ray.Origin, part.Position))
+                            return oldNamecall(unpackFn(args))
+                        end
+                    elseif method == "Raycast" and State.SilentMethod == method then
+                        local origin = args[2]
+                        if typeof(origin) == "Vector3" then
+                            args[3] = silentDirection(origin, part.Position)
+                            return oldNamecall(unpackFn(args))
+                        end
+                    end
+                end
+            end
+            return oldNamecall(...)
+        end))
+    end)
+    if not ok then oldNamecall = nil end
+
+    ok, err = pcall(function()
+        oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, index)
+            if State.Silent and self == LocalPlayer:GetMouse() and not checkcaller()
+                and State.SilentMethod == "Mouse.Hit/Target" then
+                local _, part = SilentUtil.pick()
+                if part then
+                    if index == "Target" or index == "target" then
+                        return part
+                    elseif index == "Hit" or index == "hit" then
+                        if State.SilentPrediction then
+                            return part.CFrame + (part.AssemblyLinearVelocity * State.SilentPredictionAmount)
+                        end
+                        return part.CFrame
+                    elseif index == "UnitRay" then
+                        local m = LocalPlayer:GetMouse()
+                        return Ray.new(m.Origin, (m.Hit.p - m.Origin).Unit)
+                    end
+                end
+            end
+            return oldIndex(self, index)
+        end))
+    end)
+    if not ok then oldIndex = nil end
+
+    hooksActive = oldNamecall ~= nil or oldIndex ~= nil
+end
+
+-- =====================================================================
+
 UI.fov=create("Frame",{AnchorPoint=Vector2.new(0.5,0.5),BackgroundTransparency=1,
     Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(State.FOV*2,State.FOV*2),Visible=false},UI.overlay)
 create("UICorner",{CornerRadius=UDim.new(1,0)},UI.fov)
@@ -500,7 +678,7 @@ local aliases={
     NoSpread={"spread","bulletspread","accuracyspread","spreadangle","spreadenabled"},
 }
 local aliasLookup={}
-local function normalize(name) return string.lower(tostring(name)):gsub("[^%w]", "") end
+local function normalize(name) return string.lower(tostring(name)):gsub("[^%w]","") end
 for category,names in pairs(aliases) do
     for rank,name in ipairs(names) do aliasLookup[name]={category=category,rank=rank} end
 end
@@ -511,7 +689,8 @@ WeaponScanner.dirty=true
 WeaponScanner.serial=0
 WeaponModifier.originals={}
 WeaponModifier.errors={}
-local weaponKeys={"AutoReload","FireSpeed","ProjectileSpeed","NoRecoil","NoSpread","Silent","AimKill","FlyKill"}
+-- Silent removido da lista de armas (agora é hook universal)
+local weaponKeys={"AutoReload","FireSpeed","ProjectileSpeed","NoRecoil","NoSpread","AimKill","FlyKill"}
 local incompatible="Não compatível com este sistema de armas"
 local scannerLabel
 local function candidate(record,object,key,value,kind)
@@ -623,7 +802,7 @@ function WeaponScanner.capability(key)
     if record.loading then return false,"Verificando API client-side…" end
     if not api then return false,incompatible end
     if api.Capabilities[key]~=true then return false,incompatible end
-    local methods={AutoReload="Reload",Silent="SetSilentTarget",AimKill="FireAt",FlyKill="FlyKill"}
+    local methods={AutoReload="Reload",AimKill="FireAt",FlyKill="FlyKill"}
     if methods[key] then
         if type(api[methods[key]])~="function" then return false,incompatible end
         if key=="AutoReload" and type(api.GetAmmo)~="function" then return false,"Munição client-side não acessível" end
@@ -678,12 +857,6 @@ function WeaponModifier.apply()
         end
     end
 end
-local function clearSilent(record)
-    if record and record.api and type(record.api.SetSilentTarget)=="function" then
-        local ok,result=callAPI(record.api,"SetSilentTarget",nil)
-        if not ok or result~=true then UI.message("API não confirmou a limpeza do Silent") end
-    end
-end
 function WeaponScanner.refreshUI()
     local record=WeaponScanner.current
     for _,key in ipairs(weaponKeys) do
@@ -710,7 +883,7 @@ function WeaponScanner.update()
     for tool,record in pairs(WeaponScanner.tools) do
         if not owned(tool) then
             if record==WeaponScanner.current then
-                clearSilent(record); WeaponModifier.restoreAll(); WeaponScanner.current=nil
+                WeaponModifier.restoreAll(); WeaponScanner.current=nil
             end
             if record.thread then task.cancel(record.thread); record.thread=nil end
             Connections.clear(record); WeaponScanner.tools[tool]=nil
@@ -720,7 +893,7 @@ function WeaponScanner.update()
                 record.loading=false; record.reason="API excedeu 5 segundos de carregamento"; record.apiDirty=true
             end
             if record.apiModule and not record.apiModule:IsDescendantOf(tool) then
-                if record==WeaponScanner.current then clearSilent(record); WeaponModifier.restoreAll() end
+                if record==WeaponScanner.current then WeaponModifier.restoreAll() end
                 if record.thread then task.cancel(record.thread); record.thread=nil end
                 record.api=nil; record.apiModule=nil; record.loading=false; record.attempted=false
                 record.dirty=true
@@ -734,7 +907,6 @@ function WeaponScanner.update()
         end
     end
     if nextRecord~=WeaponScanner.current then
-        clearSilent(WeaponScanner.current)
         WeaponModifier.restoreAll()
         WeaponScanner.current=nextRecord
         WeaponModifier.errors={}
@@ -786,15 +958,12 @@ function WeaponModifier.tick(target)
         local ok,result=callAPI(api,method,...)
         if not ok then
             State[key]=false; WeaponModifier.errors[key]="Erro na integração; função desligada"
-            if key=="Silent" then clearSilent(record) end
             WeaponScanner.refreshUI()
         elseif result~=true and result~=false then
             State[key]=false; WeaponModifier.errors[key]="API não confirmou a operação"
-            if key=="Silent" then clearSilent(record) end
             WeaponScanner.refreshUI()
         end
     end
-    if State.Silent then invoke("Silent","SetSilentTarget",target) end
     local now=os.clock()
     if target and now-lastFire>=0.1 then lastFire=now; invoke("AimKill","FireAt",target) end
     if target and now-lastFlyKill>=0.1 then lastFlyKill=now; invoke("FlyKill","FlyKill",target) end
@@ -818,7 +987,6 @@ end
 local function restoreValues()
     for _,key in ipairs(weaponKeys) do State[key]=false end
     State.Speed=false; State.Jump=false; State.Fly=false
-    clearSilent(WeaponScanner.current)
     local ok=WeaponModifier.restoreAll()
     CharacterManager.stopFly(); CharacterManager.restore()
     WeaponScanner.refreshUI()
@@ -838,7 +1006,6 @@ onChange=function(key,value)
     end
     State[key]=value
     if key=="ESP" and not value then ESPManager.clear() end
-    if key=="Silent" and not value then clearSilent(WeaponScanner.current) end
     if key=="Fly" then if value then CharacterManager.startFly() else CharacterManager.stopFly() end end
     if key=="Speed" or key=="WalkSpeed" or key=="Jump" or key=="JumpPower" or key=="JumpHeight" then CharacterManager.apply() end
     if table.find(weaponKeys,key) or key=="FireLevel" or key=="ProjectileLevel" then
@@ -848,19 +1015,25 @@ onChange=function(key,value)
 end
 Connections.add("UI",moon.Activated,function() onChange("Dark",not State.Dark) end)
 
--- MENU DE CONFIGURAÇÃO DO AIMBOT (Com o novo seletor de modo)
+-- =============== ABA 1: AIMBOT + SILENT AIM ===============
 toggle(1,"Aimbot","Aimbot","Mira por câmera enquanto ligado; alvos dentro do FOV.")
 selector(1,"AimMode","Modo do Aimbot",{"Sempre","Ao Mirar","Ao Atirar"},tostring,"Quando o aimbot deve puxar a mira.")
-
-toggle(1,"Silent","Silent","Requer integração real com a direção de disparo da arma.")
+toggle(1,"Silent","Silent Aim (Universal)","Hook nos raycasts + Mouse.Hit/Target. Não move a câmera.")
+selector(1,"SilentMethod","Método Silent",{"Raycast","FindPartOnRay","FindPartOnRayWithWhitelist","FindPartOnRayWithIgnoreList","Mouse.Hit/Target"},tostring,"Como redirecionar o tiro.")
+selector(1,"SilentTargetPart","Parte alvo (Silent)",{"Head","HumanoidRootPart","Random"},tostring,"Onde o tiro deve acertar.")
+selector(1,"SilentHitChance","Chance de acerto",{0,25,50,75,90,100},function(v) return v.."%" end)
+toggle(1,"SilentTeamCheck","Silent • Ignorar Time","Pula aliados no Silent Aim.")
+toggle(1,"SilentVisibleCheck","Silent • Visibilidade","Requer linha de visão até o alvo.")
+toggle(1,"SilentPrediction","Silent • Prediction","Prediz posição futura via velocidade.")
+selector(1,"SilentPredictionAmount","Prediction Amount",{0.05,0.1,0.135,0.165,0.2,0.25,0.5},function(v) return tostring(v) end)
 toggle(1,"AimKill","AimKill","Seleciona alvos e chama disparo local compatível; sem prometer dano.")
 toggle(1,"IgnoreBots","Ignorar Bots","Ligado: apenas jogadores. Desligado: inclui NPCs com Humanoid.")
 toggle(1,"IgnoreTeam","Ignorar Time","Exclui aliados; NPCs podem declarar atributo Team.")
-toggle(1,"Visibility","Visibilidade","Raycast entre câmera e alvo; ignora alvos obstruídos.")
+toggle(1,"Visibility","Visibilidade (Aimbot)","Raycast entre câmera e alvo; ignora alvos obstruídos.")
 toggle(1,"ShowFOV","Mostrar FOV","Círculo em pixels ao redor do centro da tela.")
 selector(1,"FOV","Raio do FOV",{50,80,100,140,180,220,280,350,450},function(v) return v.." px" end)
 selector(1,"Smooth","Suavização",{0,4,8,12,18,25,40},tostring,"0 = instantâneo. Valores maiores tornam a transição mais suave.")
-selector(1,"AimPart","Parte alvo",{"Head","HumanoidRootPart"},function(v) return v=="Head" and "Cabeça" or "Centro" end)
+selector(1,"AimPart","Parte alvo (Aimbot)",{"Head","HumanoidRootPart"},function(v) return v=="Head" and "Cabeça" or "Centro" end)
 
 toggle(2,"ESP","ESP Master","Ativa o gerenciador; desligar destrói todos os objetos ESP.")
 for _,spec in ipairs({{"Highlight","ESP Highlight","AlwaysOnTop: destaque através de objetos."},
@@ -880,7 +1053,6 @@ action(3,"Reexaminar arma","Atualiza candidatos, atributos e tenta identificar u
     local record=WeaponScanner.current
     if record then
         if record.loading then UI.message("A API ainda está carregando") return end
-        clearSilent(record)
         if not WeaponModifier.restoreAll() then return end
         record.api=nil; record.attempted=false; record.reason=nil
         WeaponScanner.scan(record); loadAPI(record); record.apiDirty=true
@@ -917,7 +1089,6 @@ action(5,"Destruir interface","Restaura valores e limpa GUI, ESP, voo e todas as
 local binding="S4zxPanel_"..HttpService:GenerateGUID(false)
 shutdown=function()
     if not alive then return end
-    clearSilent(WeaponScanner.current)
     WeaponModifier.restoreAll()
     CharacterManager.stopFly(); CharacterManager.restore()
     alive=false; WeaponScanner.serial=WeaponScanner.serial+1
@@ -927,7 +1098,9 @@ shutdown=function()
         if record.thread then task.cancel(record.thread); record.thread=nil end
     end
     for _,t in pairs(tweens) do t:Cancel() end
-    ESPManager.folder:Destroy(); UI.overlay:Destroy(); UI.gui:Destroy()
+    if ESPManager.folder and ESPManager.folder.Parent then ESPManager.folder:Destroy() end
+    if UI.overlay and UI.overlay.Parent then UI.overlay:Destroy() end
+    if UI.gui and UI.gui.Parent then UI.gui:Destroy() end
     table.clear(Targeting.records); table.clear(WeaponScanner.tools); table.clear(flightInputs)
 end
 local shutdownEvent=create("BindableEvent",{Name="Shutdown"},UI.gui)
@@ -954,13 +1127,12 @@ CharacterManager.bind(LocalPlayer.Character)
 local targetRecord,targetPart=nil,nil
 local accumulated,espElapsed,scanElapsed=0,0,0
 
--- RENDER STEP (Com correções de alinhamento da câmera e corpo do jogador)
+-- RENDER STEP: AIMBOT corrigido (câmera + corpo sincronizados)
 RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
     if not alive then return end
     local camera=Workspace.CurrentCamera
     if not camera then return end
-    
-    -- Verifica se deve ativar o Aimbot baseado na regra selecionada
+
     local shouldAim = false
     if State.Aimbot then
         if State.AimMode == "Sempre" then
@@ -972,25 +1144,44 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
         end
     end
 
-    if shouldAim and targetRecord and targetPart and targetPart.Parent and Targeting.valid(targetRecord) then
-        local delta=targetPart.Position-camera.CFrame.Position
-        if delta.Magnitude>0.01 then
-            local alpha=State.Smooth==0 and 1 or 1-math.exp(-dt*60/State.Smooth)
-            
-            -- Move a câmera suavemente para o alvo
-            camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,targetPart.Position),alpha)
-            
-            -- Gira o corpo do boneco junto para não ficar travado ou com bug visual
-            local localChar = CharacterManager.character
-            if localChar and localChar:FindFirstChild("HumanoidRootPart") then
-                local rootPart = localChar.HumanoidRootPart
-                local targetPosBody = Vector3.new(targetPart.Position.X, rootPart.Position.Y, targetPart.Position.Z)
-                local targetRootCFrame = CFrame.lookAt(rootPart.Position, targetPosBody)
-                rootPart.CFrame = rootPart.CFrame:Lerp(targetRootCFrame, alpha)
+    if shouldAim and targetRecord and targetPart and targetPart.Parent
+        and Targeting.valid(targetRecord) then
+        local delta = targetPart.Position - camera.CFrame.Position
+        if delta.Magnitude > 0.01 then
+            local alpha = State.Smooth == 0 and 1 or 1 - math.exp(-dt * 60 / State.Smooth)
+
+            -- 1) Move SOMENTE a câmera diretamente para o alvo
+            local desiredCam = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
+            camera.CFrame = camera.CFrame:Lerp(desiredCam, alpha)
+
+            -- 2) Rotaciona o corpo com base no LookVector da CÂMERA (mantém alinhado com o tiro)
+            local character = CharacterManager.character
+            local humanoid = CharacterManager.humanoid
+            if character and humanoid and humanoid.Health > 0 then
+                local root = character:FindFirstChild("HumanoidRootPart")
+                if root then
+                    if CharacterManager.savedAutoRotate == nil then
+                        CharacterManager.savedAutoRotate = humanoid.AutoRotate
+                        humanoid.AutoRotate = false
+                    end
+                    local camLook = camera.CFrame.LookVector
+                    local flatLook = Vector3.new(camLook.X, 0, camLook.Z)
+                    if flatLook.Magnitude > 0.001 then
+                        flatLook = flatLook.Unit
+                        local desiredRoot = CFrame.lookAt(root.Position, root.Position + flatLook)
+                        root.CFrame = root.CFrame:Lerp(desiredRoot, alpha)
+                    end
+                end
             end
         end
+    elseif CharacterManager.savedAutoRotate ~= nil then
+        -- Restaura AutoRotate quando não está mirando
+        if CharacterManager.humanoid then
+            CharacterManager.humanoid.AutoRotate = CharacterManager.savedAutoRotate
+        end
+        CharacterManager.savedAutoRotate = nil
     end
-    
+
     espElapsed=espElapsed+dt
     if State.ESP and espElapsed>=1/30 then espElapsed=0; ESPManager.update(camera) end
 end)
@@ -1010,13 +1201,16 @@ Connections.add("Loop",RunService.Heartbeat,function(dt)
     if accumulated>=1/30 then
         accumulated=0
         local camera=Workspace.CurrentCamera
-        local active=State.Aimbot or State.Silent or State.AimKill or State.FlyKill
-        if active and camera and h and h.Health>0 then targetRecord,targetPart=Targeting.pick(camera)
-        else targetRecord=nil; targetPart=nil end
-        if h and h.Health>0 then WeaponModifier.tick(targetPart)
-        elseif State.Silent then clearSilent(WeaponScanner.current) end
+        local active=State.Aimbot or State.AimKill or State.FlyKill
+        if active and camera and h and h.Health>0 then
+            targetRecord,targetPart=Targeting.pick(camera)
+        else
+            targetRecord=nil; targetPart=nil
+        end
+        if h and h.Health>0 then WeaponModifier.tick(targetPart) end
     end
 end)
 
 appearance(); UI.refresh(); WeaponScanner.update(); WeaponScanner.refreshUI()
-UI.message("Pronto • controles por toque e mouse")
+UI.message(supported and (hooksActive and "Pronto • Silent Aim hooks ativos" or "Hooks indisponíveis neste executor")
+    or "Pronto • Silent Aim requer hookmetamethod")
